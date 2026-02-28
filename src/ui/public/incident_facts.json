@@ -1,0 +1,56 @@
+{
+  "session": "Bahrain Grand Prix - Qualifying",
+  "lastUpdated": "2026-02-28T10:59:00Z",
+  "aiVerdicts": [
+    "Article 33.4 check: Unsafe release threshold crossed in pit lane camera feed.",
+    "Article 54.3 review: Driver exceeded track limits at Turn 13 under pressure lap.",
+    "Article 2.5.5 pending: Pit wall communication latency may have influenced strategy call."
+  ],
+  "facts": [
+    {
+      "id": "fact-001",
+      "timestamp": "00:21:12",
+      "lap": 9,
+      "driver": "NOR",
+      "speedKph": 287.4,
+      "deltaToLeader": 0.184,
+      "trackTempC": 31.2,
+      "sector": "S2",
+      "incident": "Car 04 rejoined after wide line at Turn 11, forcing Car 16 to lift by 18%.",
+      "confidence": 89,
+      "fiaArticle": "Appendix L, Chapter IV, Article 2(d)",
+      "ruleSummary": "Drivers must not force another driver off track and must leave a car's width when side-by-side.",
+      "ruling": "Likely warning unless repeated in race conditions."
+    },
+    {
+      "id": "fact-002",
+      "timestamp": "00:24:43",
+      "lap": 10,
+      "driver": "HAM",
+      "speedKph": 303.1,
+      "deltaToLeader": 0.072,
+      "trackTempC": 31.7,
+      "sector": "S3",
+      "incident": "Pit lane merge from Car 44 recorded at 44.6 km/h with oncoming car at unsafe proximity.",
+      "confidence": 93,
+      "fiaArticle": "Sporting Regulations, Article 33.4",
+      "ruleSummary": "Cars may not be released from a pit stop in an unsafe condition that endangers pit lane traffic.",
+      "ruling": "5-second time penalty strongly supported by telemetry envelope."
+    },
+    {
+      "id": "fact-003",
+      "timestamp": "00:27:04",
+      "lap": 11,
+      "driver": "VER",
+      "speedKph": 296.8,
+      "deltaToLeader": 0.011,
+      "trackTempC": 32.1,
+      "sector": "S1",
+      "incident": "Track limits trigger at Turn 4 detected with all four wheels beyond white line.",
+      "confidence": 96,
+      "fiaArticle": "Sporting Regulations, Article 54.3",
+      "ruleSummary": "A driver is deemed to have left the track if no part of the car remains in contact with it.",
+      "ruling": "Lap time deletion confirmed by sensor and video cross-check."
+    }
+  ]
+}

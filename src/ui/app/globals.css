@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --background: #070707;
+  --foreground: #e8e8e8;
+  --race-red: #ff1801;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "DIN Alternate", "Bahnschrift", "Segoe UI", sans-serif;
+  --font-mono: "Consolas", "Cascadia Mono", monospace;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "DIN Alternate", "Bahnschrift", "Segoe UI", sans-serif;
+  background-image:
+    radial-gradient(circle at 15% 10%, rgba(255, 24, 1, 0.1), transparent 45%),
+    radial-gradient(circle at 85% 0%, rgba(255, 24, 1, 0.08), transparent 40%),
+    repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.028) 0, rgba(255, 255, 255, 0.028) 2px, transparent 2px, transparent 9px),
+    repeating-linear-gradient(-45deg, rgba(255, 255, 255, 0.018) 0, rgba(255, 255, 255, 0.018) 2px, transparent 2px, transparent 9px),
+    linear-gradient(180deg, #090909 0%, #050505 100%);
+  background-attachment: fixed;
+}
+
+h1,
+h2,
+h3 {
+  font-family: "Eurostile", "Bank Gothic", "DIN Alternate", "Bahnschrift", sans-serif;
+  letter-spacing: 0.02em;
+}
+
+.race-panel {
+  background:
+    linear-gradient(155deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015) 40%, rgba(0, 0, 0, 0.2)),
+    rgba(12, 12, 12, 0.72);
+}
+
+.ticker-track {
+  animation: ticker 28s linear infinite;
+}
+
+@keyframes ticker {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
