@@ -1,66 +1,23 @@
 {
-  "id": "incident-1772303704306",
+  "id": "incident-1772312563173",
   "sessionName": "Live Simulation",
   "track": "Live Simulation",
+  "session_status": "UNKNOWN",
   "driver": "VER",
   "lap": 0,
-  "timestamp": "2026-02-28T21:07:41.187Z",
-  "lastUpdated": "2026-02-28T18:35:42.779688Z",
-  "speed_kph": 138,
+  "timestamp": "2026-02-28T23:35:23.093Z",
+  "lastUpdated": "2026-02-28T21:02:43.173Z",
+  "speed_kph": 226,
   "apex_gap": 0,
   "apex_clearance": 0,
-  "lateral_g": 3.82,
+  "lateral_g": 3.68,
   "braking_force": 0,
-  "incident_type": "high_g_event",
-  "incident_snapshot": "Car VER telemetry; speed 138.0 km/h; lateral load 3.82G; distance to apex 0m.",
-  "article_cited": "Article 13.2",
-  "rule_summary": "must be carried out on the survival cell used for the tests described in Articles 13.",
-  "verdict": "INVESTIGATION",
-  "ruling": "INVESTIGATION",
-  "confidence_score": 0.91,
-  "trigger_steward": false,
-  "incident_description": "Car VER telemetry; speed 138.0 km/h; lateral load 3.82G; distance to apex 0m.",
-  "delta_to_leader": 0,
-  "track_temp_c": null,
-  "sector": "N/A",
-  "judicial_verdict": "Judicial Verdict: INVESTIGATION. Telemetry-to-rule reasoning: Retrieved citation: Article 13.2 Rule text: must be carried out on the survival cell used for the tests described in Articles 13. Apex clearance is below one car width threshold (2.0 m). Visual analysis confirms Article 33.4 breach at the apex",
-  "retrieved_articles": [
-    {
-      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
-      "year": "unknown",
-      "document_category": "Driving Standards",
-      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_398"
-    },
-    {
-      "source": "rules/sporting_regulations/FIA 2025 Formula 1 Sporting Regulations - Issue 5 - 2025-04-30.md",
-      "year": "unknown",
-      "document_category": "Sporting Regulations",
-      "chunk_id": "rules/sporting_regulations/FIA 2025 Formula 1 Sporting Regulations - Issue 5 - 2025-04-30.md::chunk_119"
-    },
-    {
-      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
-      "year": "unknown",
-      "document_category": "Driving Standards",
-      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_326"
-    },
-    {
-      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
-      "year": "unknown",
-      "document_category": "Driving Standards",
-      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_46"
-    },
-    {
-      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
-      "year": "unknown",
-      "document_category": "Driving Standards",
-      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_551"
-    },
-    {
-      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
-      "year": "unknown",
-      "document_category": "Driving Standards",
-      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_327"
-    }
-  ],
-  "query": "Car VER telemetry; speed 138.0 km/h; lateral load 3.82G; distance to apex 0m."
+  "incident_type": "normal_telemetry",
+  "incident_snapshot": "Car VER telemetry; speed 226.0 km/h; lateral load 3.68G; distance to apex 0m.",
+  "article_cited": "Awaiting Article",
+  "rule_summary": "No steward trigger in current packet.",
+  "verdict": "NO_FURTHER_ACTION",
+  "ruling": "NO_FURTHER_ACTION",
+  "confidence_score": 0.9,
+  "trigger_steward": false
 }
