@@ -1,0 +1,60 @@
+{
+  "id": "live-incident",
+  "sessionName": "Live Simulation",
+  "track": "Live Simulation",
+  "timestamp": "2026-02-28T20:53:46.008Z",
+  "lastUpdated": "2026-02-28T18:21:55.223570Z",
+  "driver": "VER",
+  "incident_type": "high_g_event",
+  "incident_description": "Car VER telemetry; speed 302.0 km/h; lateral load 3.58G; distance to apex 0m.",
+  "speed_kph": 302,
+  "delta_to_leader": 0,
+  "track_temp_c": null,
+  "sector": "N/A",
+  "lap": 0,
+  "article_cited": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+  "rule_summary": "ll sustain a load of 75kN vertically upward on each rear attachment of the Secondary Roll Structure.",
+  "ruling": "INVESTIGATION",
+  "verdict": "INVESTIGATION",
+  "confidence_score": 0.91,
+  "judicial_verdict": "Judicial Verdict: INVESTIGATION. Telemetry-to-rule reasoning: Retrieved citation: rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md Rule text: ll sustain a load of 75kN vertically upward on each rear attachment of the Secondary Roll Structure. Apex clearance is below one car width threshold (2.0 m). Visual analysis confirms Article 33.4 breach at the apex",
+  "retrieved_articles": [
+    {
+      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+      "year": "unknown",
+      "document_category": "Driving Standards",
+      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_397"
+    },
+    {
+      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+      "year": "unknown",
+      "document_category": "Driving Standards",
+      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_103"
+    },
+    {
+      "source": "rules/sporting_regulations/FIA 2025 Formula 1 Sporting Regulations - Issue 5 - 2025-04-30.md",
+      "year": "unknown",
+      "document_category": "Sporting Regulations",
+      "chunk_id": "rules/sporting_regulations/FIA 2025 Formula 1 Sporting Regulations - Issue 5 - 2025-04-30.md::chunk_58"
+    },
+    {
+      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+      "year": "unknown",
+      "document_category": "Driving Standards",
+      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_79"
+    },
+    {
+      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+      "year": "unknown",
+      "document_category": "Driving Standards",
+      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_326"
+    },
+    {
+      "source": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md",
+      "year": "unknown",
+      "document_category": "Driving Standards",
+      "chunk_id": "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.md::chunk_398"
+    }
+  ],
+  "query": "Car VER telemetry; speed 302.0 km/h; lateral load 3.58G; distance to apex 0m."
+}

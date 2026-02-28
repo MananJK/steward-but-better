@@ -1,0 +1,7 @@
+{
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "processed_rules_dir": "C:\\Users\\manan\\Documents\\steward-but-better\\processed_rules",
+  "index_file": "C:\\Users\\manan\\Documents\\steward-but-better\\src\\brain\\fia_rules.index",
+  "markdown_files": 9,
+  "chunks_indexed": 3725
+}
