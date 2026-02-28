@@ -8,6 +8,9 @@ fastf1
 pandas
 numpy
 
+# Vector Search
+faiss-cpu
+
 # Vision & Processing
 opencv-python
 pillow
