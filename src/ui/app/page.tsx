@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import IncidentLog from "./components/IncidentLog";
 import RulesReference from "./components/RulesReference";
 import TelemetryCard from "./components/TelemetryCard";
 import VerdictTicker from "./components/VerdictTicker";
@@ -45,7 +46,7 @@ export default function Home() {
 
   return (
     <div className="relative min-h-screen pb-20">
-      <main className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1.7fr_1fr] lg:px-10">
+      <main className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1.5fr_1fr_1fr] lg:px-10">
         <section className="space-y-6">
           <header className="race-panel rounded-2xl border border-white/10 px-5 py-4 shadow-2xl shadow-black/40">
             <p className="text-xs uppercase tracking-[0.24em] text-zinc-400">StewardButBetter</p>
@@ -59,6 +60,7 @@ export default function Home() {
         </section>
 
         <RulesReference fact={dashboard.currentFact} />
+        <IncidentLog />
       </main>
 
       <VerdictTicker
