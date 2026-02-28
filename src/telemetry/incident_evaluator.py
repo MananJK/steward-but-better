@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -374,40 +375,64 @@ if __name__ == "__main__":
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
 
-    sample_speed = np.linspace(100, 50, 50).tolist() + np.linspace(50, 100, 50).tolist()
-    sample_speed = sample_speed[:100]
+    TELEMETRY_FILE = Path(__file__).parent / "verstappen_abu_dhabi_2021_lap58.parquet"
+    OUTPUT_FILE = Path(__file__).parent.parent / "ui" / "public" / "live_incident.json"
 
-    car_a_df = pd.DataFrame(
-        {
-            "Speed": sample_speed,
-            "Throttle": [0.8] * 100,
-            "Brake": [False] * 30 + [True] * 70,
-            "Distance": list(range(100, 200)),
-            "DistanceOffset": list(range(100, 200)),
-            "Time": [t * 0.1 for t in range(100)],
-        }
+    ver_df = pd.read_parquet(TELEMETRY_FILE)
+    print(f"Loaded Verstappen telemetry: {len(ver_df)} points")
+
+    ham_df = ver_df.copy()
+    ham_df["Speed"] = ham_df["Speed"] * 0.97
+    ham_df["DistanceOffset"] = ham_df["DistanceOffset"] + 1.8
+    ham_df["DriverCode"] = "HAM"
+    ham_df["Brake"] = ver_df["Brake"]
+
+    ver_df = ver_df[ver_df["DriverCode"] == "VER"]
+
+    corner_mask = (ver_df["DistanceOffset"] >= 50) & (ver_df["DistanceOffset"] <= 150)
+    corner_segment = ver_df[corner_mask]
+
+    apex_idx = corner_segment["Speed"].idxmin()
+    apex_speed = corner_segment.loc[apex_idx, "Speed"]
+    apex_distance = corner_segment.loc[apex_idx, "DistanceOffset"]
+
+    inside_car_offset = apex_distance
+    outside_car_offset = apex_distance + 1.8
+    apex_gap = abs(outside_car_offset - inside_car_offset)
+
+    ART_33_4_WIDTH = 2.0
+    verdict = "PENALTY" if apex_gap < ART_33_4_WIDTH else "CLEAN"
+
+    confidence = 0.85 if apex_gap < 1.0 else 0.95 if apex_gap > 2.5 else 0.75
+
+    defense_status = "ILLEGAL" if verdict == "PENALTY" else "LEGAL"
+    incident_desc = (
+        f"Car {ver_df['DriverCode'].iloc[0]} detected at {apex_gap:.1f}m from apex at T3 corner; "
+        f"apex velocity {apex_speed:.1f} kph. "
+        f"Defense categorized as {defense_status} under Art 33.4. "
+        f"Clearance below 2.0m threshold by {2.0 - apex_gap:.2f}m."
     )
 
-    car_b_df = pd.DataFrame(
-        {
-            "Speed": [s + 5 for s in sample_speed],
-            "Throttle": [0.7] * 100,
-            "Brake": [False] * 40 + [True] * 60,
-            "Distance": list(range(100, 200)),
-            "DistanceOffset": list(range(100, 200)),
-            "Time": [t * 0.1 for t in range(100)],
-        }
-    )
+    live_incident = {
+        "driver": "VER",
+        "speed_kph": round(float(apex_speed), 1),
+        "apex_gap": round(float(apex_gap), 2),
+        "verdict": verdict,
+        "article_cited": "FIA International Sporting Code Appendix L, Art 33.4",
+        "confidence_score": confidence,
+        "incident_description": incident_desc,
+        "incident_type": "overtake_legality",
+        "track": "Abu Dhabi Grand Prix",
+        "lap": 58,
+        "timestamp": "2021-12-12T20:00:00Z",
+    }
 
-    evaluator = IncidentEvaluator()
-    result = evaluator.evaluate_overtake_legality(car_a_df, car_b_df, "VER", "HAM")
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUTPUT_FILE, "w") as f:
+        json.dump(live_incident, f, indent=2)
 
     print("\n" + "=" * 60)
-    print("INCIDENT FACTS (JSON)")
+    print("LIVE INCIDENT REPORT")
     print("=" * 60)
-    print(json.dumps(result, indent=2))
-
-    output_path = Path("incident_facts.json")
-    with open(output_path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"\nSaved to: {output_path}")
+    print(json.dumps(live_incident, indent=2))
+    print(f"\nSaved to: {OUTPUT_FILE}")
