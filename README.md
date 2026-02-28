@@ -93,6 +93,5 @@ Commercial licensing available for FIA-accredited partners brave enough to admit
 
 ---
 
-*Built by engineers who know that at 370km/h, there's no time for second guesses.*
+*Built by an engineer who knows that at 370km/h, there's no time for second guesses.*
 
-**#DriveToSurvive #F1Tech #RacingEngineering**
