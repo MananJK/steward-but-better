@@ -1,0 +1,19 @@
+{
+  "sessionName": "Abu Dhabi Grand Prix - Race",
+  "driver": "VER",
+  "speed_kph": 140.0,
+  "apex_gap": 1.8,
+  "verdict": "PENALTY",
+  "article_cited": "FIA International Sporting Code Appendix L, Art 33.4",
+  "confidence_score": 0.75,
+  "incident_type": "overtake_legality",
+  "incident_description": "Aggressive overtake under braking with limited racing room at the apex.",
+  "recentJudgements": [
+    "Car 1: Investigated for overtake legality at Turn 9.",
+    "Car 16: No further action after defensive line review.",
+    "Car 4: Reprimand issued for weaving on straight."
+  ],
+  "track": "Abu Dhabi Grand Prix",
+  "lap": 58,
+  "timestamp": "2021-12-12T20:00:00Z"
+}

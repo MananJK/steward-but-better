@@ -3,7 +3,7 @@ import { Analytics } from "@vercel/analytics/react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "StewardButSmarter Race Control",
+  title: "StewardButBetter Race Control",
   description: "High-performance race control dashboard for telemetry, rulings, and FIA references.",
 };
 

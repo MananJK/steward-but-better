@@ -1,13 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { IncidentFact, IncidentFactsPayload } from "../types/incident";
+import type { IncidentFact, LiveIncidentPayload } from "../types/incident";
 
 type TelemetryUpdate = {
   currentFact: IncidentFact | null;
-  facts: IncidentFact[];
-  verdicts: string[];
-  session: string;
+  recentJudgements: string[];
+  sessionName: string;
   lastUpdated: string;
 };
 
@@ -17,15 +16,13 @@ type TelemetryCardProps = {
 
 const EMPTY_UPDATE: TelemetryUpdate = {
   currentFact: null,
-  facts: [],
-  verdicts: [],
-  session: "No Session Loaded",
+  recentJudgements: [],
+  sessionName: "No Session Loaded",
   lastUpdated: "",
 };
 
 export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps) {
-  const [payload, setPayload] = useState<IncidentFactsPayload | null>(null);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [payload, setPayload] = useState<LiveIncidentPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -33,12 +30,12 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
 
     const fetchTelemetry = async () => {
       try {
-        const response = await fetch("/incident_facts.json", { cache: "no-store" });
+        const response = await fetch("/live_incident.json", { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Telemetry fetch failed (${response.status})`);
         }
 
-        const data = (await response.json()) as IncidentFactsPayload;
+        const data = (await response.json()) as LiveIncidentPayload;
         if (isMounted) {
           setPayload(data);
           setError(null);
@@ -51,7 +48,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
     };
 
     fetchTelemetry();
-    const refreshInterval = window.setInterval(fetchTelemetry, 20000);
+    const refreshInterval = window.setInterval(fetchTelemetry, 2000);
 
     return () => {
       isMounted = false;
@@ -59,33 +56,45 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
     };
   }, []);
 
-  useEffect(() => {
-    if (!payload?.facts?.length) {
-      setActiveIndex(0);
-      return;
+  const currentFact = useMemo(() => {
+    if (!payload) {
+      return null;
     }
 
-    const cycleInterval = window.setInterval(() => {
-      setActiveIndex((previous) => (previous + 1) % payload.facts.length);
-    }, 2600);
+    const normalizedConfidence = payload.confidence_score ?? 0;
+    const confidence =
+      normalizedConfidence <= 1 ? Math.round(normalizedConfidence * 100) : Math.round(normalizedConfidence);
 
-    return () => window.clearInterval(cycleInterval);
-  }, [payload?.facts]);
+    return {
+      id: payload.id ?? "live-incident",
+      timestamp: payload.timestamp ?? "",
+      lap: payload.lap ?? 0,
+      driver: payload.driver ?? "--",
+      incidentType: payload.incident_type ?? "--",
+      speedKph: payload.speed_kph ?? 0,
+      deltaToLeader: payload.delta_to_leader ?? payload.apex_gap ?? 0,
+      trackTempC: payload.track_temp_c ?? 0,
+      sector: payload.sector ?? "N/A",
+      incident: payload.incident_description ?? payload.incident_type ?? "No incident details.",
+      confidence: Math.max(0, Math.min(100, confidence)),
+      fiaArticle: payload.article_cited ?? "Awaiting Article",
+      ruleSummary: payload.rule_summary ?? "Rule summary unavailable.",
+      ruling: payload.ruling ?? payload.verdict ?? "Pending",
+    } satisfies IncidentFact;
+  }, [payload]);
 
-  const currentFact = useMemo(
-    () => payload?.facts?.[activeIndex] ?? null,
-    [payload?.facts, activeIndex],
-  );
+  const sessionName = payload?.sessionName ?? payload?.track ?? EMPTY_UPDATE.sessionName;
+  const recentJudgements = useMemo(() => payload?.recentJudgements ?? [], [payload?.recentJudgements]);
+  const lastUpdated = payload?.lastUpdated ?? payload?.timestamp ?? EMPTY_UPDATE.lastUpdated;
 
   useEffect(() => {
     onTelemetryUpdate?.({
       currentFact,
-      facts: payload?.facts ?? [],
-      verdicts: payload?.aiVerdicts ?? [],
-      session: payload?.session ?? EMPTY_UPDATE.session,
-      lastUpdated: payload?.lastUpdated ?? EMPTY_UPDATE.lastUpdated,
+      recentJudgements,
+      sessionName,
+      lastUpdated,
     });
-  }, [currentFact, onTelemetryUpdate, payload]);
+  }, [currentFact, lastUpdated, onTelemetryUpdate, recentJudgements, sessionName]);
 
   const confidenceWidth = `${Math.max(0, Math.min(100, currentFact?.confidence ?? 0))}%`;
 
@@ -94,7 +103,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       <div className="flex items-center justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.22em] text-zinc-400">Telemetry Feed</p>
-          <h2 className="mt-2 text-xl font-semibold text-zinc-100">{payload?.session ?? "Awaiting Feed"}</h2>
+          <h2 className="mt-2 text-xl font-semibold text-zinc-100">{sessionName || "Awaiting Feed"}</h2>
         </div>
         <div className="flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-emerald-300">
           <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
@@ -106,7 +115,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
 
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <Metric label="Driver" value={currentFact?.driver ?? "--"} />
-        <Metric label="Sector" value={currentFact?.sector ?? "--"} />
+        <Metric label="Incident Type" value={currentFact?.incidentType ?? "--"} />
         <Metric label="Lap" value={currentFact ? `Lap ${currentFact.lap}` : "--"} />
         <Metric
           label="Speed"
@@ -118,15 +127,15 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
           value={currentFact ? `${currentFact.deltaToLeader.toFixed(3)}s` : "--"}
         />
         <Metric
-          label="Track Temp"
-          value={currentFact ? `${currentFact.trackTempC.toFixed(1)} C` : "--"}
+          label="Sector"
+          value={currentFact?.sector ?? "--"}
         />
       </div>
 
       <div className="mt-5">
         <p className="text-xs uppercase tracking-[0.22em] text-zinc-500">Incident Snapshot</p>
         <p className="mt-2 text-sm leading-relaxed text-zinc-300">
-          {currentFact?.incident ?? "Waiting for incident facts from Kilo-code data feed."}
+          {currentFact?.incident ?? "Waiting for live incident data feed."}
         </p>
       </div>
 
@@ -141,7 +150,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       </div>
 
       <p className="mt-5 text-xs text-zinc-500">
-        Last Sync: {payload?.lastUpdated ?? "Pending"}
+        Last Sync: {lastUpdated || "Pending"}
       </p>
     </section>
   );

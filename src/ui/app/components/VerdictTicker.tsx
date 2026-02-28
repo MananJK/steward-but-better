@@ -1,5 +1,5 @@
 type VerdictTickerProps = {
-  verdicts: string[];
+  recentJudgements: string[];
   activeRuling?: string;
 };
 
@@ -8,8 +8,8 @@ const DEFAULT_VERDICTS = [
   "Telemetry pipeline online.",
 ];
 
-export default function VerdictTicker({ verdicts, activeRuling }: VerdictTickerProps) {
-  const stream = [...(verdicts.length ? verdicts : DEFAULT_VERDICTS)];
+export default function VerdictTicker({ recentJudgements, activeRuling }: VerdictTickerProps) {
+  const stream = [...(recentJudgements.length ? recentJudgements : DEFAULT_VERDICTS)];
   if (activeRuling) {
     stream.unshift(`Live: ${activeRuling}`);
   }
