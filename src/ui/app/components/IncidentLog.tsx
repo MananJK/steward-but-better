@@ -4,18 +4,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ActiveInvestigation } from "../types/incident";
 
-type LocalInvestigation = ActiveInvestigation & {
-  isExiting?: boolean;
-};
-
 const DISMISS_ANIMATION_MS = 2000;
 
 export default function IncidentLog() {
-  const [investigations, setInvestigations] = useState<LocalInvestigation[]>([]);
+  const [investigations, setInvestigations] = useState<ActiveInvestigation[]>([]);
   const [closedIds, setClosedIds] = useState<Record<string, boolean>>({});
   const [dismissInFlightIds, setDismissInFlightIds] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const dismissTimeoutsRef = useRef<Record<string, number>>({});
+
+  const mutate = async (key: string) => {
+    if (key !== "/api/investigations") {
+      return;
+    }
+
+    const response = await fetch("/active_investigations.json", { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Investigation refresh failed (${response.status})`);
+    }
+
+    const data = (await response.json()) as ActiveInvestigation[];
+    setInvestigations(Array.isArray(data) ? data : []);
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -30,13 +40,7 @@ export default function IncidentLog() {
 
         const data = (await response.json()) as ActiveInvestigation[];
         if (isMounted) {
-          setInvestigations((previous) => {
-            const exitingIds = new Set(previous.filter((entry) => entry.isExiting).map((entry) => entry.id));
-            const nextEntries = Array.isArray(data) ? data : [];
-            return nextEntries.map((entry) =>
-              exitingIds.has(entry.id) ? { ...entry, isExiting: true } : entry
-            );
-          });
+          setInvestigations(Array.isArray(data) ? data : []);
           setError(null);
         }
       } catch (fetchError) {
@@ -66,9 +70,6 @@ export default function IncidentLog() {
     }
 
     setDismissInFlightIds((previous) => ({ ...previous, [id]: true }));
-    setInvestigations((previous) =>
-      previous.map((entry) => (entry.id === id ? { ...entry, isExiting: true } : entry))
-    );
 
     const timeoutId = window.setTimeout(async () => {
       try {
@@ -79,12 +80,9 @@ export default function IncidentLog() {
           throw new Error(`Dismiss failed (${response.status})`);
         }
 
-        setInvestigations((previous) => previous.filter((entry) => entry.id !== id));
+        await mutate("/api/investigations");
         setError(null);
       } catch (dismissError) {
-        setInvestigations((previous) =>
-          previous.map((entry) => (entry.id === id ? { ...entry, isExiting: false } : entry))
-        );
         setError(dismissError instanceof Error ? dismissError.message : "Unable to dismiss investigation");
       } finally {
         setDismissInFlightIds((previous) => {
@@ -100,7 +98,7 @@ export default function IncidentLog() {
   };
 
   const totalOpen = useMemo(
-    () => investigations.filter((entry) => !closedIds[entry.id] && !entry.isExiting).length,
+    () => investigations.filter((entry) => !closedIds[entry.id]).length,
     [closedIds, investigations]
   );
 
@@ -130,8 +128,10 @@ export default function IncidentLog() {
             return (
               <article
                 key={entry.id}
-                className={`rounded-xl border border-white/10 bg-black/30 p-4 transition-all duration-[2000ms] ease-in-out ${
-                  entry.isExiting ? "translate-x-12 opacity-0 pointer-events-none" : "translate-x-0 opacity-100"
+                className={`rounded-xl border bg-black/30 p-4 transition-all duration-300 ease-in-out ${
+                  isDismissing
+                    ? "border-emerald-400/70 opacity-50"
+                    : "border-white/10 opacity-100"
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">

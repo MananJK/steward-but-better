@@ -1,5 +1,5 @@
 ﻿import { execFile } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { promises as fs, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -128,11 +128,18 @@ async function runStewardAgent(incident: IncidentPayload): Promise<IncidentPaylo
     "print(json.dumps(result))",
   ].join("; ");
 
-  const { stdout } = await execFileAsync(
+  const runAgent = execFileAsync(
     "python",
     ["-c", pythonSnippet, stewardAgentPath, query, JSON.stringify(incident)],
     { cwd: sourceRoot, maxBuffer: 10 * 1024 * 1024 }
   );
+  const timeoutMs = 30_000;
+  const { stdout } = await Promise.race([
+    runAgent,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Steward agent timed out after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
 
   const trimmed = stdout.trim();
   const lastLine = trimmed.split(/\r?\n/).pop() ?? "{}";
@@ -163,9 +170,12 @@ async function writeJsonAtomic(filePath: string, payload: unknown): Promise<void
 async function writeLiveIncident(payload: IncidentPayload): Promise<void> {
   const publicDir = path.join(process.cwd(), "public");
   const liveIncidentPath = path.join(publicDir, "live_incident.json");
+  const liveIncidentTempPath = path.join(publicDir, "live_incident.tmp");
+  const jsonContent = `${JSON.stringify(payload, null, 2)}\n`;
 
   await fs.mkdir(publicDir, { recursive: true });
-  await writeJsonAtomic(liveIncidentPath, payload);
+  writeFileSync(liveIncidentTempPath, jsonContent, "utf-8");
+  renameSync(liveIncidentTempPath, liveIncidentPath);
 }
 
 async function writeCurrentInquiry(payload: IncidentPayload): Promise<void> {
@@ -203,6 +213,12 @@ function toGLoad(value: unknown): number {
   }
 
   return Math.abs(parsed);
+}
+
+function isFileLockError(error: unknown): boolean {
+  const err = error as NodeJS.ErrnoException | undefined;
+  const code = err?.code ?? "";
+  return code === "EPERM" || code === "EACCES" || code === "EBUSY";
 }
 
 async function clearActiveInvestigations(): Promise<void> {
@@ -338,6 +354,17 @@ export async function POST(request: Request) {
       { status: 200 }
     );
   } catch (error) {
+    if (isFileLockError(error)) {
+      return NextResponse.json(
+        {
+          ok: true,
+          accepted: true,
+          message: "Telemetry accepted but deferred because incident file is temporarily locked.",
+        },
+        { status: 202 }
+      );
+    }
+
     const message = error instanceof Error ? error.message : "Unknown telemetry route error";
     return NextResponse.json({ ok: false, error: message }, { status: 500 });
   }
