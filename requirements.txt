@@ -1,0 +1,18 @@
+# Mistral & AI
+mistralai
+huggingface_hub
+python-dotenv
+
+# F1 & Data
+fastf1
+pandas
+numpy
+
+# Vision & Processing
+opencv-python
+pillow
+PyMuPDF
+
+# Web/API (Optional for UI)
+fastapi
+uvicorn
