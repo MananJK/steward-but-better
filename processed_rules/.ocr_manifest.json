@@ -1,0 +1,29 @@
+{
+  "rules/driving_standards/f1_driving_standards_guidelines_version_4.1_feb_20_2025.pdf": {
+    "checksum": "7f04374b43ddbf0b53cf2b2ccb44df9c6591c3769e9a57ac45e0f7803d8b80e8"
+  },
+  "rules/driving_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.pdf": {
+    "checksum": "454b76e2b388e61db50c0d116ff59477848a0b7e081f38142242808213dc0826"
+  },
+  "rules/sporting_regulations/FIA 2025 Formula 1 Sporting Regulations - Issue 5 - 2025-04-30.pdf": {
+    "checksum": "525eef22a60f0755a4468281dd7c78c5ea5bd0eec38dc1b09cc31a0c0132854e"
+  },
+  "rules/sporting_regulations/fia_2023_formula_1_sporting_regulations_-_issue_5_-_2023-04-25_0.pdf": {
+    "checksum": "e4fd13d258bd2d6eb86cb01e6a7c19f1b351b679293d4c2323cf48ced9a503c5"
+  },
+  "rules/sporting_regulations/fia_2024_formula_1_sporting_regulations_-_issue_7_-_2024-07-31.pdf": {
+    "checksum": "82f8048dcc2c86c26e8d69321f2700ea9b274346e28bade43815dea31a3993a3"
+  },
+  "rules/sporting_regulations/formula_1_-_sporting_regulations_-_2021_-_iss_12_-_2021-11-11.pdf": {
+    "checksum": "d7d8e6eec73ecc4fdc60788b053000c078dcfd72f9dda138d0175acd31c5e955"
+  },
+  "rules/sporting_regulations/formula_1_-_sporting_regulations_-_2022_-_iss_6_-_2022-04-29.pdf": {
+    "checksum": "c23766243e56c7d980122ff7fb28321de6570a19c29f1b8882fac2640514a516"
+  },
+  "rules/sporting_regulations/sportif.pdf": {
+    "checksum": "f56c6e0b478d2363dc7de3cf558d04d4d2294d6e600ba5cbc7751ec2a15ae592"
+  },
+  "rules/steward_standards/fia_2025_formula_1_technical_regulations_-_issue_03_-_2025-04-07.pdf": {
+    "checksum": "454b76e2b388e61db50c0d116ff59477848a0b7e081f38142242808213dc0826"
+  }
+}
