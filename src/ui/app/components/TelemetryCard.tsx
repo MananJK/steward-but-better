@@ -22,7 +22,9 @@ const EMPTY_UPDATE: TelemetryUpdate = {
 };
 
 export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps) {
-  const [payload, setPayload] = useState<LiveIncidentPayload | null>(null);
+  const [livePayload, setLivePayload] = useState<LiveIncidentPayload | null>(null);
+  const [inquiryPayload, setInquiryPayload] = useState<LiveIncidentPayload | null>(null);
+  const [dismissInFlight, setDismissInFlight] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasMounted, setHasMounted] = useState(false);
 
@@ -35,19 +37,42 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
 
     const fetchTelemetry = async () => {
       try {
-        const response = await fetch("/live_incident.json", { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error(`Telemetry fetch failed (${response.status})`);
+        const liveResponse = await fetch("/live_incident.json", { cache: "no-store" });
+        if (!liveResponse.ok) {
+          throw new Error(`Telemetry fetch failed (${liveResponse.status})`);
         }
 
-        const data = (await response.json()) as LiveIncidentPayload;
+        const liveData = (await liveResponse.json()) as LiveIncidentPayload;
         if (isMounted) {
-          setPayload(data);
+          setLivePayload(liveData);
+        }
+      } catch (liveError) {
+        if (isMounted) {
+          setError(liveError instanceof Error ? liveError.message : "Unknown telemetry error");
+        }
+      }
+
+      try {
+        const inquiryResponse = await fetch("/api/current-inquiry", { cache: "no-store" });
+        if (!inquiryResponse.ok) {
+          throw new Error(`Current inquiry fetch failed (${inquiryResponse.status})`);
+        }
+
+        const inquiryData = (await inquiryResponse.json()) as {
+          manual_clear_required?: boolean;
+          inquiry?: LiveIncidentPayload | null;
+        };
+
+        if (isMounted) {
+          const pinned =
+            inquiryData.manual_clear_required === true && inquiryData.inquiry ? inquiryData.inquiry : null;
+          setInquiryPayload(pinned);
           setError(null);
         }
-      } catch (fetchError) {
+      } catch (inquiryError) {
         if (isMounted) {
-          setError(fetchError instanceof Error ? fetchError.message : "Unknown telemetry error");
+          setInquiryPayload(null);
+          setError(inquiryError instanceof Error ? inquiryError.message : "Unknown inquiry error");
         }
       }
     };
@@ -61,36 +86,59 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
     };
   }, []);
 
+  const displayedPayload = inquiryPayload ?? livePayload;
+
   const currentFact = useMemo(() => {
-    if (!payload) {
+    if (!displayedPayload) {
       return null;
     }
 
-    const normalizedConfidence = payload.confidence_score ?? 0;
+    const normalizedConfidence = displayedPayload.confidence_score ?? 0;
     const confidence =
       normalizedConfidence <= 1 ? Math.round(normalizedConfidence * 100) : Math.round(normalizedConfidence);
 
     return {
-      id: payload.id ?? "live-incident",
-      timestamp: payload.timestamp ?? "",
-      lap: payload.lap ?? 0,
-      driver: payload.driver ?? "--",
-      incidentType: payload.incident_type ?? "--",
-      speedKph: payload.speed_kph ?? 0,
-      deltaToLeader: payload.delta_to_leader ?? payload.apex_gap ?? 0,
-      trackTempC: payload.track_temp_c ?? 0,
-      sector: payload.sector ?? "N/A",
-      incident: payload.incident_description ?? payload.incident_type ?? "No incident details.",
+      id: displayedPayload.id ?? "live-incident",
+      timestamp: displayedPayload.timestamp ?? "",
+      lap: displayedPayload.lap ?? 0,
+      driver: displayedPayload.driver ?? "--",
+      incidentType: displayedPayload.incident_type ?? "--",
+      lateralG: displayedPayload.lateral_g ?? 0,
+      speedKph: displayedPayload.speed_kph ?? 0,
+      deltaToLeader: displayedPayload.delta_to_leader ?? displayedPayload.apex_gap ?? 0,
+      trackTempC: displayedPayload.track_temp_c ?? 0,
+      sector: displayedPayload.sector ?? "N/A",
+      incident: displayedPayload.incident_description ?? displayedPayload.incident_type ?? "No incident details.",
       confidence: Math.max(0, Math.min(100, confidence)),
-      fiaArticle: payload.article_cited ?? "Awaiting Article",
-      ruleSummary: payload.rule_summary ?? "",
-      ruling: payload.ruling ?? payload.verdict ?? "Pending",
+      fiaArticle: displayedPayload.article_cited ?? "Awaiting Article",
+      ruleSummary: displayedPayload.rule_summary ?? "",
+      ruling: displayedPayload.ruling ?? displayedPayload.verdict ?? "Pending",
+      triggerSteward: displayedPayload.trigger_steward === true,
     } satisfies IncidentFact;
-  }, [payload]);
+  }, [displayedPayload]);
 
-  const sessionName = payload?.sessionName ?? payload?.track ?? EMPTY_UPDATE.sessionName;
-  const recentJudgements = useMemo(() => payload?.recentJudgements ?? [], [payload?.recentJudgements]);
-  const lastUpdated = payload?.lastUpdated ?? payload?.timestamp ?? EMPTY_UPDATE.lastUpdated;
+  const sessionName = displayedPayload?.sessionName ?? displayedPayload?.track ?? EMPTY_UPDATE.sessionName;
+  const recentJudgements = useMemo(
+    () => displayedPayload?.recentJudgements ?? [],
+    [displayedPayload?.recentJudgements]
+  );
+  const lastUpdated = displayedPayload?.lastUpdated ?? displayedPayload?.timestamp ?? EMPTY_UPDATE.lastUpdated;
+
+  const handleDismissInquiry = async () => {
+    try {
+      setDismissInFlight(true);
+      const response = await fetch("/api/current-inquiry", { method: "DELETE" });
+      if (!response.ok) {
+        throw new Error(`Dismiss failed (${response.status})`);
+      }
+      setInquiryPayload(null);
+      setError(null);
+    } catch (dismissError) {
+      setError(dismissError instanceof Error ? dismissError.message : "Unable to dismiss current inquiry");
+    } finally {
+      setDismissInFlight(false);
+    }
+  };
 
   useEffect(() => {
     onTelemetryUpdate?.({
@@ -124,6 +172,22 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       </div>
 
       {error ? <p className="mt-4 text-sm text-red-300">{error}</p> : null}
+
+      {inquiryPayload ? (
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-xl border border-[#FF1801]/35 bg-[#FF1801]/10 p-3">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#FF1801]">
+            Manual Clear Required
+          </p>
+          <button
+            type="button"
+            onClick={handleDismissInquiry}
+            disabled={dismissInFlight}
+            className="rounded-md border border-[#FF1801]/45 bg-[#FF1801]/12 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-[#FF1801] hover:bg-[#FF1801]/20 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {dismissInFlight ? "Dismissing..." : "DISMISS"}
+          </button>
+        </div>
+      ) : null}
 
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <Metric label="Driver" value={currentFact?.driver ?? "--"} />
