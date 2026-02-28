@@ -31,6 +31,7 @@ class LiveSimulator:
         self._logger = logging.getLogger(__name__)
         self._session = None
         self._cooldown_remaining = 0
+        self.last_steward_trigger_time = {}
         if cache_enabled:
             cache_dir = Path("f1_cache")
             cache_dir.mkdir(exist_ok=True)
@@ -275,11 +276,7 @@ class LiveSimulator:
         ]
 
         for i, time_val in enumerate(sample_times):
-            packet = self._build_packet(telemetry_data, time_val, i)
-
-            if self._cooldown_remaining > 0:
-                packet["trigger_steward"] = False
-                self._cooldown_remaining -= 1
+            packet = self.broadcast_packet(telemetry_data, time_val, i)
 
             self._logger.info(
                 "Broadcasting packet %d: %s",
@@ -288,14 +285,6 @@ class LiveSimulator:
             )
 
             self._send_telemetry(packet)
-
-            if packet.get("trigger_steward"):
-                self._logger.warning(
-                    "STEWARD TRIGGERED! Lateral G %.2f exceeded threshold %.2f",
-                    packet["lateral_g"],
-                    self.G_FORCE_THRESHOLD,
-                )
-                self._cooldown_remaining = self.COOLDOWN_PACKETS
 
             if i < len(sample_times) - 1:
                 time.sleep(interval_seconds)
@@ -374,6 +363,35 @@ class LiveSimulator:
                 ),
                 "sector": str(driver_row.get("Sector", "S3")),
             }
+
+        return packet
+
+    def broadcast_packet(
+        self,
+        telemetry_data: dict[str, pd.DataFrame],
+        time_val: float,
+        packet_index: int,
+    ) -> dict:
+        """Build and broadcast a telemetry packet with per-driver cooldown logic."""
+        packet = self._build_packet(telemetry_data, time_val, packet_index)
+
+        driver = packet["driver"]
+        current_time = time_val
+
+        if driver in self.last_steward_trigger_time:
+            time_since_trigger = current_time - self.last_steward_trigger_time[driver]
+            if time_since_trigger < 5.0:
+                print("COOLDOWN ACTIVE - Skipping Judicial Review")
+                packet["trigger_steward"] = False
+                return packet
+
+        if packet.get("trigger_steward"):
+            self.last_steward_trigger_time[driver] = current_time
+            self._logger.warning(
+                "STEWARD TRIGGERED! Lateral G %.2f exceeded threshold %.2f",
+                packet["lateral_g"],
+                self.G_FORCE_THRESHOLD,
+            )
 
         return packet
 
