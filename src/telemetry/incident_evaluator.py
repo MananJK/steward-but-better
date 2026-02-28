@@ -399,28 +399,47 @@ if __name__ == "__main__":
     inside_car_offset = apex_distance
     outside_car_offset = apex_distance + 1.8
     apex_gap = abs(outside_car_offset - inside_car_offset)
+    apex_clearance = apex_gap
+
+    speed_ms = apex_speed / 3.6
+    corner_radius = 30.0
+    lateral_g = (speed_ms**2) / (9.81 * corner_radius) if corner_radius > 0 else 0
+
+    braking_idx = ver_df[ver_df["Brake"] == True].index
+    if len(braking_idx) > 0:
+        first_brake_idx = braking_idx[0]
+        brake_speed = ver_df.loc[first_brake_idx, "Speed"]
+        braking_distance = ver_df.loc[first_brake_idx, "DistanceOffset"]
+        braking_decel = abs((brake_speed - ver_df["Speed"].iloc[0]) / 3.6) / 2.0
+        braking_force = min(braking_decel / 9.81, 1.0)
+    else:
+        braking_force = 0.0
 
     ART_33_4_WIDTH = 2.0
-    verdict = "PENALTY" if apex_gap < ART_33_4_WIDTH else "CLEAN"
+    verdict = "PENALTY" if apex_clearance < ART_33_4_WIDTH else "CLEAN"
+    defense_category = "aggressive defense" if verdict == "PENALTY" else "legal defense"
 
-    confidence = 0.85 if apex_gap < 1.0 else 0.95 if apex_gap > 2.5 else 0.75
+    confidence = (
+        0.85 if apex_clearance < 1.0 else 0.95 if apex_clearance > 2.5 else 0.75
+    )
 
-    defense_status = "ILLEGAL" if verdict == "PENALTY" else "LEGAL"
-    incident_desc = (
-        f"Car {ver_df['DriverCode'].iloc[0]} detected at {apex_gap:.1f}m from apex at T3 corner; "
-        f"apex velocity {apex_speed:.1f} kph. "
-        f"Defense categorized as {defense_status} under Art 33.4. "
-        f"Clearance below 2.0m threshold by {2.0 - apex_gap:.2f}m."
+    incident_snapshot = (
+        f"Car {ver_df['DriverCode'].iloc[0]} vs Car HAM; "
+        f"Apex clearance {apex_clearance:.1f}m; entry speed {apex_speed:.0f}km/h. "
+        f"Incident categorized as {defense_category}."
     )
 
     live_incident = {
         "driver": "VER",
         "speed_kph": round(float(apex_speed), 1),
         "apex_gap": round(float(apex_gap), 2),
+        "apex_clearance": round(float(apex_clearance), 2),
+        "lateral_g": round(float(lateral_g), 2),
+        "braking_force": round(float(braking_force), 2),
         "verdict": verdict,
         "article_cited": "FIA International Sporting Code Appendix L, Art 33.4",
         "confidence_score": confidence,
-        "incident_description": incident_desc,
+        "incident_snapshot": incident_snapshot,
         "incident_type": "overtake_legality",
         "track": "Abu Dhabi Grand Prix",
         "lap": 58,
