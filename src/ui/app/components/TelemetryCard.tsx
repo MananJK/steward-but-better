@@ -24,6 +24,11 @@ const EMPTY_UPDATE: TelemetryUpdate = {
 export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps) {
   const [payload, setPayload] = useState<LiveIncidentPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hasMounted, setHasMounted] = useState(false);
+
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -78,7 +83,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       incident: payload.incident_description ?? payload.incident_type ?? "No incident details.",
       confidence: Math.max(0, Math.min(100, confidence)),
       fiaArticle: payload.article_cited ?? "Awaiting Article",
-      ruleSummary: payload.rule_summary ?? "Rule summary unavailable.",
+      ruleSummary: payload.rule_summary ?? "",
       ruling: payload.ruling ?? payload.verdict ?? "Pending",
     } satisfies IncidentFact;
   }, [payload]);
@@ -97,6 +102,13 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
   }, [currentFact, lastUpdated, onTelemetryUpdate, recentJudgements, sessionName]);
 
   const confidenceWidth = `${Math.max(0, Math.min(100, currentFact?.confidence ?? 0))}%`;
+  const confidence = currentFact?.confidence ?? 0;
+  const confidenceBarColorClass =
+    confidence < 50 ? "bg-[#FF1801]" : confidence <= 80 ? "bg-[#FF8C00]" : "bg-[#16A34A]";
+  const isSectorPending = !currentFact?.sector || currentFact.sector === "N/A";
+  const confidenceStyle = hasMounted
+    ? { width: confidenceWidth }
+    : { width: "0%" };
 
   return (
     <section className="race-panel h-full rounded-2xl border border-white/10 p-5 shadow-2xl shadow-black/40">
@@ -128,7 +140,8 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
         />
         <Metric
           label="Sector"
-          value={currentFact?.sector ?? "--"}
+          value={isSectorPending ? "Calculating..." : currentFact?.sector ?? "--"}
+          pulse={isSectorPending}
         />
       </div>
 
@@ -145,7 +158,11 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
           <span className="text-zinc-300">{currentFact?.confidence ?? 0}%</span>
         </div>
         <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
-          <div className="h-full rounded-full bg-[#FF1801] transition-[width] duration-500" style={{ width: confidenceWidth }} />
+          <div
+            suppressHydrationWarning
+            className={`h-full rounded-full transition-[width,background-color] duration-500 ${confidenceBarColorClass}`}
+            style={confidenceStyle}
+          />
         </div>
       </div>
 
@@ -160,13 +177,14 @@ type MetricProps = {
   label: string;
   value: string;
   accent?: boolean;
+  pulse?: boolean;
 };
 
-function Metric({ label, value, accent }: MetricProps) {
+function Metric({ label, value, accent, pulse }: MetricProps) {
   return (
     <div className="rounded-xl border border-white/5 bg-black/30 p-3">
       <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{label}</p>
-      <p className={`mt-1 text-sm font-semibold ${accent ? "text-[#FF1801]" : "text-zinc-100"}`}>{value}</p>
+      <p className={`mt-1 text-sm font-semibold ${pulse ? "animate-pulse text-zinc-300" : accent ? "text-[#FF1801]" : "text-zinc-100"}`}>{value}</p>
     </div>
   );
 }

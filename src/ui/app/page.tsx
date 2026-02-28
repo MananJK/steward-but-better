@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import RulesReference from "./components/RulesReference";
 import TelemetryCard from "./components/TelemetryCard";
 import VerdictTicker from "./components/VerdictTicker";
@@ -18,6 +18,30 @@ export default function Home() {
     recentJudgements: [],
     sessionName: "Race Control",
   });
+  const handleTelemetryUpdate = useCallback((update: {
+    currentFact: IncidentFact | null;
+    recentJudgements: string[];
+    sessionName: string;
+    lastUpdated: string;
+  }) => {
+    setDashboard((previous) => {
+      const sameFact = previous.currentFact?.id === update.currentFact?.id
+        && previous.currentFact?.timestamp === update.currentFact?.timestamp
+        && previous.currentFact?.ruling === update.currentFact?.ruling;
+      const sameSession = previous.sessionName === update.sessionName;
+      const sameJudgements = previous.recentJudgements.join("|") === update.recentJudgements.join("|");
+
+      if (sameFact && sameSession && sameJudgements) {
+        return previous;
+      }
+
+      return {
+        currentFact: update.currentFact,
+        recentJudgements: update.recentJudgements,
+        sessionName: update.sessionName,
+      };
+    });
+  }, []);
 
   return (
     <div className="relative min-h-screen pb-20">
@@ -31,15 +55,7 @@ export default function Home() {
             </p>
           </header>
 
-          <TelemetryCard
-            onTelemetryUpdate={(update) =>
-              setDashboard({
-                currentFact: update.currentFact,
-                recentJudgements: update.recentJudgements,
-                sessionName: update.sessionName,
-              })
-            }
-          />
+          <TelemetryCard onTelemetryUpdate={handleTelemetryUpdate} />
         </section>
 
         <RulesReference fact={dashboard.currentFact} />
