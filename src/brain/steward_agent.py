@@ -9,11 +9,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import faiss
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_INDEX_DIR = Path(__file__).resolve().parents[1] / "brain" / "steward_vector_db"
+DEFAULT_INDEX_DIR = Path(__file__).resolve().parent / "fia_rules.index"
+LEGAL_CONTEXT_PRIORITY_TERM = "Appendix L Chapter IV: Code of Driving Conduct"
+TRACK_LIMITS_ARTICLE = "Article 33.3"
+LEAVING_SPACE_ARTICLE = "Article 33.4"
 
 
 def _coerce_incident_json(incident_json: str | dict[str, Any]) -> dict[str, Any]:
@@ -153,6 +159,19 @@ def _extract_features(incident_data: dict[str, Any], query: str) -> dict[str, An
         sudden_lateral_drop = (peak - latest) >= 1.2 or largest_step >= 1.0
 
     text_blob = " ".join([incident_type, description, query_lower])
+    component_failure_flag = _coerce_bool(incident_data.get("component_failure"))
+    if component_failure_flag is None:
+        component_failure_flag = _coerce_bool(incident_data.get("component_failure_flag"))
+    if component_failure_flag is None:
+        flags = incident_data.get("flags")
+        if isinstance(flags, list):
+            component_failure_flag = any(
+                "component failure" in str(item).lower() for item in flags
+            )
+        elif isinstance(flags, dict):
+            component_failure_flag = _coerce_bool(flags.get("component_failure"))
+    if component_failure_flag is None:
+        component_failure_flag = "component failure" in text_blob
 
     return {
         "lateral_g": lateral_g,
@@ -164,11 +183,14 @@ def _extract_features(incident_data: dict[str, Any], query: str) -> dict[str, An
         "hard_braking": braking_force is not None and braking_force >= 0.75,
         "no_evasive_braking": no_evasive_braking,
         "low_clearance": apex_clearance is not None and apex_clearance < 2.0,
+        "high_clearance": apex_clearance is not None and apex_clearance > 2.0,
         "visual_apex_clearance": visual_signals["visual_apex_clearance"],
         "visual_over_line": visual_signals["visual_over_line"],
         "visual_signal_present": visual_signals["visual_signal_present"],
         "visual_low_clearance": visual_signals["visual_apex_clearance"] is not None
         and visual_signals["visual_apex_clearance"] < 2.0,
+        "visual_high_clearance": visual_signals["visual_apex_clearance"] is not None
+        and visual_signals["visual_apex_clearance"] > 2.0,
         "collision_signal": any(
             token in text_blob
             for token in ["collision", "contact", "hit", "crash", "impact"]
@@ -178,22 +200,38 @@ def _extract_features(incident_data: dict[str, Any], query: str) -> dict[str, An
             token in text_blob
             for token in ["off track", "off-track", "leaving the track", "forced wide"]
         ),
+        "component_failure_flag": component_failure_flag is True,
+        "incident_type": incident_type,
     }
 
 
 def _build_retrieval_query(query: str, incident_data: dict[str, Any], features: dict[str, Any]) -> str:
     keywords: list[str] = []
+    reasoned_focus_terms: list[str] = []
+
+    prefers_track_limits = bool(
+        features["high_lateral_load"]
+        and (features["high_clearance"] or features["visual_high_clearance"])
+    )
 
     if features["collision_signal"]:
         keywords.extend(["collision", "causing a collision", "avoidable contact"])
     if features["off_track_signal"]:
         keywords.extend(["leaving the track", "forcing a car off track"])
-    if features["low_clearance"]:
+    if features["low_clearance"] and not prefers_track_limits:
         keywords.extend(["overtaking", "car width", "space at apex"])
     if features["hard_braking"]:
         keywords.extend(["unsafe maneuver", "dangerous driving", "late braking"])
-    if features["visual_over_line"]:
-        keywords.extend(["track limits", "Article 33.4", "over the line at apex"])
+    if features["visual_over_line"] or prefers_track_limits:
+        keywords.extend(["track limits", TRACK_LIMITS_ARTICLE, "over the line at apex"])
+        reasoned_focus_terms.extend(
+            [
+                "contextual focus: high lateral_g with apex clearance >2.0m",
+                f"prefer {TRACK_LIMITS_ARTICLE} track limits over {LEAVING_SPACE_ARTICLE} leaving space",
+            ]
+        )
+    elif features["low_clearance"] or features["visual_low_clearance"]:
+        keywords.extend(["leaving space", LEAVING_SPACE_ARTICLE, "space at apex"])
 
     lateral_g = features.get("lateral_g")
     if lateral_g is not None:
@@ -202,6 +240,9 @@ def _build_retrieval_query(query: str, incident_data: dict[str, Any], features: 
     incident_type = incident_data.get("incident_type")
     if incident_type:
         keywords.append(str(incident_type))
+    if features.get("incident_type") == "high_g_event":
+        keywords.append(LEGAL_CONTEXT_PRIORITY_TERM)
+    keywords.extend(reasoned_focus_terms)
 
     suffix = " | ".join(dict.fromkeys(keywords))
     return f"{query}\nTelemetry context: {json.dumps(incident_data, sort_keys=True)}\nPriority terms: {suffix}".strip()
@@ -211,10 +252,40 @@ def _load_vector_store(index_dir: str | Path) -> FAISS:
     index_path = Path(index_dir).resolve()
     if not index_path.exists():
         raise FileNotFoundError(
-            f"Vector index directory not found: {index_path}. Build it first with vector_index.py."
+            f"Vector index path not found: {index_path}. Build it first with vector_index.py."
         )
 
     embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    if index_path.is_file() and index_path.suffix == ".index":
+        metadata_path = index_path.with_name(f"{index_path.stem}_metadata.json")
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Vector index metadata file not found: {metadata_path}."
+            )
+
+        metadata_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        texts = metadata_payload.get("texts", [])
+        metadatas = metadata_payload.get("metadatas", [])
+
+        if len(texts) != len(metadatas):
+            raise ValueError(
+                "Vector metadata mismatch: texts and metadatas lengths do not match."
+            )
+
+        index = faiss.read_index(str(index_path))
+        documents = {
+            str(i): Document(page_content=texts[i], metadata=metadatas[i])
+            for i in range(len(texts))
+        }
+        index_to_docstore_id = {i: str(i) for i in range(len(texts))}
+
+        return FAISS(
+            embedding_function=embeddings,
+            index=index,
+            docstore=InMemoryDocstore(documents),
+            index_to_docstore_id=index_to_docstore_id,
+        )
+
     return FAISS.load_local(
         str(index_path),
         embeddings,
@@ -247,7 +318,25 @@ def _extract_years(value: Any, years: set[str] | None = None) -> set[str]:
     return years
 
 
-def _retrieve_articles(vector_store: FAISS, query: str, incident_data: dict[str, Any], k: int = 6) -> list[Any]:
+def _is_technical_only_doc(doc: Any) -> bool:
+    haystack = " ".join(
+        [
+            str(getattr(doc, "page_content", "")),
+            str((getattr(doc, "metadata", {}) or {}).get("source", "")),
+            str((getattr(doc, "metadata", {}) or {}).get("Document Category", "")),
+        ]
+    ).lower()
+    blocked_terms = ["secondary roll structure", "technical regulations"]
+    return any(term in haystack for term in blocked_terms)
+
+
+def _retrieve_articles(
+    vector_store: FAISS,
+    query: str,
+    incident_data: dict[str, Any],
+    features: dict[str, Any],
+    k: int = 6,
+) -> list[Any]:
     try:
         docs_with_scores = vector_store.similarity_search_with_score(query, k=max(k * 4, 20))
         docs = [doc for doc, _score in docs_with_scores]
@@ -261,6 +350,9 @@ def _retrieve_articles(vector_store: FAISS, query: str, incident_data: dict[str,
         ]
         if year_filtered:
             docs = year_filtered
+
+    if not features.get("component_failure_flag", False):
+        docs = [doc for doc in docs if not _is_technical_only_doc(doc)]
 
     return docs[:k]
 
@@ -300,6 +392,28 @@ def _summarize_rule(doc: Any) -> str:
         summary = text[:320]
 
     return summary.strip()
+
+
+def _detect_rule_conflict(docs: list[Any]) -> tuple[bool, list[str]]:
+    article_hits: list[str] = []
+    topic_tags: set[str] = set()
+
+    for doc in docs:
+        content = str(getattr(doc, "page_content", "")).lower()
+        source = str((getattr(doc, "metadata", {}) or {}).get("source", "")).lower()
+        haystack = f"{content} {source}"
+        articles = re.findall(r"article\s*\d+(?:\.\d+)*", haystack, flags=re.IGNORECASE)
+        for item in articles:
+            normalized = re.sub(r"\s+", " ", item.strip().title())
+            article_hits.append(normalized)
+        if "track limits" in haystack or "leave the track" in haystack:
+            topic_tags.add("track_limits")
+        if "car width" in haystack or "space at apex" in haystack or "alongside" in haystack:
+            topic_tags.add("leaving_space")
+
+    unique_articles = sorted(set(article_hits))
+    conflicting = len(unique_articles) >= 2 and len(topic_tags) >= 2
+    return conflicting, unique_articles
 
 
 def _decide_verdict(features: dict[str, Any]) -> tuple[str, list[str], float]:
@@ -358,8 +472,15 @@ def run_steward_agent(
     features = _extract_features(incident_data, query)
 
     vector_store = _load_vector_store(index_dir=index_dir)
+    print("Link established with 3,725 rule chunks")
     augmented_query = _build_retrieval_query(query, incident_data, features)
-    docs = _retrieve_articles(vector_store=vector_store, query=augmented_query, incident_data=incident_data, k=k)
+    docs = _retrieve_articles(
+        vector_store=vector_store,
+        query=augmented_query,
+        incident_data=incident_data,
+        features=features,
+        k=k,
+    )
 
     if not docs:
         raise ValueError("No relevant FIA articles were retrieved from the index.")
@@ -369,8 +490,24 @@ def run_steward_agent(
     rule_summary = _summarize_rule(top_doc)
 
     ruling, reasons, confidence = _decide_verdict(features)
+    conflict_detected, conflicting_articles = _detect_rule_conflict(docs)
 
-    if citation != "FIA Rule Reference" and rule_summary != "Rule summary unavailable.":
+    if conflict_detected:
+        reasons.append(
+            f"Retrieved rule set includes potentially conflicting guidance ({', '.join(conflicting_articles[:4])})."
+        )
+        confidence = max(0.0, confidence - 0.18)
+        if ruling == "PENALTY":
+            ruling = "PENDING FURTHER DATA"
+            reasons.append(
+                "Penalty decision deferred pending additional telemetry/video alignment due to rule conflict."
+            )
+
+    if (
+        not conflict_detected
+        and citation != "FIA Rule Reference"
+        and rule_summary != "Rule summary unavailable."
+    ):
         confidence = max(confidence, 0.91)
 
     evidence_lines = [
@@ -382,7 +519,7 @@ def run_steward_agent(
     judicial_verdict = (
         f"Judicial Verdict: {ruling}. "
         f"Telemetry-to-rule reasoning: {' '.join(evidence_lines)} "
-        "Visual analysis confirms Article 33.4 breach at the apex"
+        f"Contextual legal focus considered between {TRACK_LIMITS_ARTICLE} and {LEAVING_SPACE_ARTICLE}."
     )
 
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -405,7 +542,7 @@ def run_steward_agent(
         "rule_summary": rule_summary,
         "ruling": ruling,
         "verdict": ruling,
-        "confidence_score": round(max(confidence, 0.91), 2),
+        "confidence_score": round(confidence, 2),
         "judicial_verdict": judicial_verdict,
         "retrieved_articles": [
             {

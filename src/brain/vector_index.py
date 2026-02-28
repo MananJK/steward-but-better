@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -15,10 +16,16 @@ from huggingface_hub import InferenceClient
 
 DEFAULT_RULES_DIR = Path("processed_rules")
 DEFAULT_INDEX_FILE = Path("src/brain/fia_rules.index")
+DEFAULT_PROGRESS_FILE = Path("src/brain/indexing_progress.json")
 HF_API_KEY = "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"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 YEAR_PATTERN = re.compile(r"^(19|20)\d{2}$")
 IGNORED_CATEGORY_PARTS = {"rules", "processed_rules", "documents", "fia"}
+
+BATCH_SIZE = 50
+BATCHES_BEFORE_SAVE = 5
+MAX_RETRIES = 5
+RETRY_DELAY_SECONDS = 5
 
 
 def _discover_markdown_files(processed_rules_dir: Path) -> List[Path]:
@@ -104,24 +111,15 @@ def _prepare_texts_and_metadata(
     return texts, metadatas
 
 
-def _generate_embeddings(texts: List[str], client: InferenceClient) -> np.ndarray:
-    embeddings = []
-    for text in texts:
-        embedding = client.feature_extraction(
-            text,
-            model=EMBEDDING_MODEL,
-        )
-        embeddings.append(embedding)
-    return np.array(embeddings, dtype=np.float32)
-
-
 def build_vector_index(
     processed_rules_dir: str | Path = DEFAULT_RULES_DIR,
     index_file: str | Path = DEFAULT_INDEX_FILE,
+    progress_file: str | Path = DEFAULT_PROGRESS_FILE,
     embedding_model: str = EMBEDDING_MODEL,
 ) -> Path:
     processed_rules_path = Path(processed_rules_dir).resolve()
     index_path = Path(index_file).resolve()
+    progress_path = Path(progress_file).resolve()
 
     if not processed_rules_path.exists():
         raise FileNotFoundError(
@@ -141,11 +139,122 @@ def build_vector_index(
 
     logging.info("Prepared %d text chunks for indexing.", len(texts))
 
-    client = InferenceClient(token=HF_API_KEY)
-    logging.info("Generating embeddings with model: %s", embedding_model)
-    embeddings = _generate_embeddings(texts, client)
+    progress = {}
+    if progress_path.exists():
+        with open(progress_path, "r") as f:
+            progress = json.load(f)
+            completed_chunks = set(progress.get("completed_chunks", []))
+        logging.info(
+            "Resuming from checkpoint: %d chunks already embedded",
+            len(completed_chunks),
+        )
+    else:
+        completed_chunks = set()
 
-    dimension = embeddings.shape[1]
+    client = InferenceClient(token=HF_API_KEY)
+    logging.info(
+        "Generating embeddings with model: %s (batch size: %d)",
+        embedding_model,
+        BATCH_SIZE,
+    )
+
+    all_embeddings = []
+    batch_count = 0
+    successful_batches = 0
+    dimension = None
+
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch_texts = texts[i : i + BATCH_SIZE]
+        batch_indices = list(range(i, min(i + BATCH_SIZE, len(texts))))
+
+        remaining_in_batch = [
+            idx for idx in batch_indices if idx not in completed_chunks
+        ]
+
+        if not remaining_in_batch:
+            logging.info(
+                "Skipping batch %d-%d (already complete)",
+                i + 1,
+                min(i + BATCH_SIZE, len(texts)),
+            )
+            continue
+
+        batch_to_embed = [texts[idx] for idx in remaining_in_batch]
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                batch_embeddings = []
+                for text in batch_to_embed:
+                    embedding = client.feature_extraction(text, model=embedding_model)
+                    batch_embeddings.append(embedding)
+                break
+            except Exception as e:
+                error_str = str(e)
+                if "500" in error_str or "503" in error_str:
+                    if attempt < MAX_RETRIES:
+                        wait_time = RETRY_DELAY_SECONDS * (2**attempt)
+                        logging.warning(
+                            "Batch %d-%d hit %s error, retrying in %ds (attempt %d/%d)",
+                            i + 1,
+                            min(i + BATCH_SIZE, len(texts)),
+                            error_str[:50],
+                            wait_time,
+                            attempt + 1,
+                            MAX_RETRIES,
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        logging.error("Batch failed after %d retries", MAX_RETRIES)
+                        raise
+                else:
+                    raise
+
+        embedding_array = np.array(batch_embeddings, dtype=np.float32)
+
+        if dimension is None:
+            dimension = embedding_array.shape[1]
+
+        for j, idx in enumerate(remaining_in_batch):
+            while len(all_embeddings) <= idx:
+                all_embeddings.append(None)
+            all_embeddings[idx] = embedding_array[j]
+
+        completed_chunks.update(remaining_in_batch)
+
+        progress = {
+            "completed_chunks": list(completed_chunks),
+            "last_batch_index": i,
+        }
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(progress_path, "w") as f:
+            json.dump(progress, f)
+
+        batch_count += 1
+        successful_batches += 1
+        logging.info(
+            "Embedded batch %d-%d (%d/%d chunks done)",
+            i + 1,
+            min(i + BATCH_SIZE, len(texts)),
+            len(completed_chunks),
+            len(texts),
+        )
+
+        if successful_batches > 0 and successful_batches % BATCHES_BEFORE_SAVE == 0:
+            valid_embeddings = [e for e in all_embeddings if e is not None]
+            if valid_embeddings:
+                embeddings_matrix = np.vstack(valid_embeddings)
+                index = faiss.IndexFlatL2(dimension)
+                index.add(embeddings_matrix)
+                index_path.parent.mkdir(parents=True, exist_ok=True)
+                faiss.write_index(index, str(index_path))
+                logging.info(
+                    "Incremental save: FAISS index saved after %d batches",
+                    successful_batches,
+                )
+
+    valid_embeddings = [e for e in all_embeddings if e is not None]
+    embeddings = np.vstack(valid_embeddings)
+
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
 
@@ -160,6 +269,9 @@ def build_vector_index(
             },
             f,
         )
+
+    if progress_path.exists():
+        progress_path.unlink()
 
     manifest = {
         "embedding_model": embedding_model,
