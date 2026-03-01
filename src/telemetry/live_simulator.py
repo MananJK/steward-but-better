@@ -7,6 +7,7 @@ real-time racing conditions. It iterates through recorded telemetry data at
 
 from __future__ import annotations
 
+import argparse
 import logging
 import threading
 import time
@@ -462,20 +463,58 @@ def main():
 
     logger = logging.getLogger(__name__)
 
-    logger.info("=" * 60)
-    logger.info("F1 Live Telemetry Simulator")
-    logger.info("Loading 2021 Abu Dhabi GP - Lap 58")
-    logger.info("=" * 60)
+    parser = argparse.ArgumentParser(description="F1 Live Telemetry Simulator")
+    parser.add_argument(
+        "--year",
+        type=int,
+        default=2021,
+        help="Championship year (e.g., 2021, 2025)",
+    )
+    parser.add_argument(
+        "--gp",
+        type=str,
+        default="Abu Dhabi",
+        help="Grand Prix name (e.g., 'Abu Dhabi', 'Monaco', 'Silverstone')",
+    )
+    parser.add_argument(
+        "--start-lap",
+        type=int,
+        default=58,
+        help="Lap number to load telemetry from",
+    )
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear the F1 cache before loading new data",
+    )
+    args = parser.parse_args()
+
+    if args.clear_cache:
+        cache_dir = Path("f1_cache")
+        if cache_dir.exists():
+            import shutil
+
+            shutil.rmtree(cache_dir)
+            cache_dir.mkdir(exist_ok=True)
+            logger.info("Cache cleared via shutil")
 
     simulator = LiveSimulator(cache_enabled=True)
 
+    if args.clear_cache:
+        fastf1.Cache.clear_cache()
+
+    logger.info("=" * 60)
+    logger.info("F1 Live Telemetry Simulator")
+    logger.info(f"Loading {args.year} {args.gp} GP - Lap {args.start_lap}")
+    logger.info("=" * 60)
+
     try:
         telemetry_data = simulator.load_telemetry(
-            year=2021,
-            race_name="Abu Dhabi",
+            year=args.year,
+            race_name=args.gp,
             session_type="R",
             driver_codes=["VER", "HAM"],
-            lap_number=58,
+            lap_number=args.start_lap,
         )
 
         for driver, df in telemetry_data.items():

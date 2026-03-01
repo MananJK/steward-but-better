@@ -20,6 +20,14 @@ DEFAULT_INDEX_DIR = Path(__file__).resolve().parent / "fia_rules.index"
 LEGAL_CONTEXT_PRIORITY_TERM = "Appendix L Chapter IV: Code of Driving Conduct"
 TRACK_LIMITS_ARTICLE = "Article 33.3"
 LEAVING_SPACE_ARTICLE = "Article 33.4"
+INCIDENTS_ARTICLE = "Article 54.3"
+YEAR_2025_QUERY_PREFIX = (
+    "Using the 2025 FIA Sporting Regulations, identify the specific article for driving conduct."
+)
+DRIVING_CONDUCT_NEGATIVE_CONSTRAINT = (
+    "Do not cite technical survival cell rules (Art 33.4) for driving conduct incidents; "
+    "prioritize Appendix L, Chapter IV and Article 54.3."
+)
 
 
 def _coerce_incident_json(incident_json: str | dict[str, Any]) -> dict[str, Any]:
@@ -205,9 +213,56 @@ def _extract_features(incident_data: dict[str, Any], query: str) -> dict[str, An
     }
 
 
+def _extract_telemetry_year(incident_data: dict[str, Any]) -> str | None:
+    telemetry = incident_data.get("telemetry")
+    candidates: list[Any] = []
+    if isinstance(telemetry, dict):
+        candidates.extend(
+            [
+                telemetry.get("year"),
+                telemetry.get("season"),
+                telemetry.get("telemetry_year"),
+            ]
+        )
+    candidates.extend(
+        [
+            incident_data.get("year"),
+            incident_data.get("season"),
+            incident_data.get("telemetry_year"),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        maybe_year = str(candidate).strip()
+        if re.fullmatch(r"(19|20)\d{2}", maybe_year):
+            return maybe_year
+
+    extracted = sorted(_extract_years(incident_data))
+    return extracted[0] if extracted else None
+
+
+def _is_driving_conduct_incident(features: dict[str, Any]) -> bool:
+    if features.get("component_failure_flag", False):
+        return False
+    return True
+
+
 def _build_retrieval_query(query: str, incident_data: dict[str, Any], features: dict[str, Any]) -> str:
     keywords: list[str] = []
     reasoned_focus_terms: list[str] = []
+    query_prefix = ""
+    telemetry_year = _extract_telemetry_year(incident_data)
+    driving_conduct_incident = _is_driving_conduct_incident(features)
+
+    if telemetry_year == "2025":
+        query_prefix = f"{YEAR_2025_QUERY_PREFIX}\n"
+    if driving_conduct_incident and telemetry_year == "2025":
+        reasoned_focus_terms.append(DRIVING_CONDUCT_NEGATIVE_CONSTRAINT)
+        keywords.extend([LEGAL_CONTEXT_PRIORITY_TERM, INCIDENTS_ARTICLE])
+    elif driving_conduct_incident:
+        keywords.extend([LEGAL_CONTEXT_PRIORITY_TERM, INCIDENTS_ARTICLE])
 
     prefers_track_limits = bool(
         features["high_lateral_load"]
@@ -245,7 +300,11 @@ def _build_retrieval_query(query: str, incident_data: dict[str, Any], features: 
     keywords.extend(reasoned_focus_terms)
 
     suffix = " | ".join(dict.fromkeys(keywords))
-    return f"{query}\nTelemetry context: {json.dumps(incident_data, sort_keys=True)}\nPriority terms: {suffix}".strip()
+    return (
+        f"{query_prefix}{query}\n"
+        f"Telemetry context: {json.dumps(incident_data, sort_keys=True)}\n"
+        f"Priority terms: {suffix}"
+    ).strip()
 
 
 def _load_vector_store(index_dir: str | Path) -> FAISS:
@@ -330,6 +389,29 @@ def _is_technical_only_doc(doc: Any) -> bool:
     return any(term in haystack for term in blocked_terms)
 
 
+def _is_survival_cell_rule_doc(doc: Any) -> bool:
+    haystack = " ".join(
+        [
+            str(getattr(doc, "page_content", "")),
+            str((getattr(doc, "metadata", {}) or {}).get("source", "")),
+            str((getattr(doc, "metadata", {}) or {}).get("Document Category", "")),
+        ]
+    ).lower()
+    return "survival cell" in haystack and (
+        "technical regulations" in haystack or "article 12" in haystack or "article 13" in haystack
+    )
+
+
+def _is_art_33_4_doc(doc: Any) -> bool:
+    haystack = " ".join(
+        [
+            str(getattr(doc, "page_content", "")),
+            str((getattr(doc, "metadata", {}) or {}).get("source", "")),
+        ]
+    ).lower()
+    return bool(re.search(r"(art(?:icle)?\.?\s*33\.4)", haystack, flags=re.IGNORECASE))
+
+
 def _retrieve_articles(
     vector_store: FAISS,
     query: str,
@@ -343,6 +425,14 @@ def _retrieve_articles(
     except Exception:
         docs = vector_store.similarity_search(query, k=max(k * 4, 20))
 
+    telemetry_year = _extract_telemetry_year(incident_data)
+    if telemetry_year:
+        telemetry_year_filtered = [
+            doc for doc in docs if str(doc.metadata.get("Year", "unknown")) == telemetry_year
+        ]
+        if telemetry_year_filtered:
+            docs = telemetry_year_filtered
+
     year_hints = _extract_years(incident_data)
     if year_hints:
         year_filtered = [
@@ -353,6 +443,11 @@ def _retrieve_articles(
 
     if not features.get("component_failure_flag", False):
         docs = [doc for doc in docs if not _is_technical_only_doc(doc)]
+    if _is_driving_conduct_incident(features):
+        docs = [doc for doc in docs if not _is_survival_cell_rule_doc(doc)]
+        non_art_33_4_docs = [doc for doc in docs if not _is_art_33_4_doc(doc)]
+        if non_art_33_4_docs:
+            docs = non_art_33_4_docs
 
     return docs[:k]
 
