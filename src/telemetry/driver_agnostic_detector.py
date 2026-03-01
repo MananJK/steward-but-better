@@ -22,12 +22,24 @@ class DriverAgnosticDetector:
     """Driver-agnostic incident detector for F1 telemetry."""
 
     PROXIMITY_THRESHOLD_PCT = 30.0
+    PROXIMITY_TIME_THRESHOLD = 0.5
     HIGH_SPEED_ZONE_THRESHOLD_KMH = 200.0
     LATERAL_G_DEVIATION_THRESHOLD = 1.5
+    SPEED_DELTA_BRAKING_THRESHOLD = 10.0
 
     def __init__(self) -> None:
         self._logger = logging.getLogger(__name__)
         self._corner_profiles: dict[str, dict[str, float]] = {}
+
+    def _timedelta_to_seconds(self, td: Any) -> float:
+        """Convert timedelta64 to float seconds."""
+        if td is None:
+            return 0.0
+        if hasattr(td, "total_seconds"):
+            return td.total_seconds()
+        if hasattr(td, "item"):
+            return float(td.item()) / 1e9
+        return float(td)
 
     def analyze_incident(
         self,
@@ -61,14 +73,16 @@ class DriverAgnosticDetector:
 
         proximity_trigger = self._check_proximity_trigger(driver_a_df, driver_b_df)
         anomaly_trigger = self._check_anomaly_detection(driver_a_df, driver_b_df)
+        speed_delta_trigger = self._check_speed_delta_braking(driver_a_df, driver_b_df)
 
         brain_input = self._prepare_brain_input(
             driver_a_df, driver_b_df, driver_a_id, driver_b_id
         )
 
         incident_detected = (
-            proximity_trigger["triggered"] or anomaly_trigger["triggered"]
-        )
+            proximity_trigger["triggered"]
+            and (anomaly_trigger["triggered"] or speed_delta_trigger["triggered"])
+        ) or anomaly_trigger["triggered"]
 
         return {
             "incident_detected": incident_detected,
@@ -80,8 +94,11 @@ class DriverAgnosticDetector:
             },
             "proximity_trigger": proximity_trigger,
             "anomaly_trigger": anomaly_trigger,
+            "speed_delta_trigger": speed_delta_trigger,
             "brain_input": brain_input,
-            "verdict": self._determine_verdict(proximity_trigger, anomaly_trigger),
+            "verdict": self._determine_verdict(
+                proximity_trigger, anomaly_trigger, speed_delta_trigger
+            ),
         }
 
     def _calculate_g_forces(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -156,7 +173,8 @@ class DriverAgnosticDetector:
     def _check_proximity_trigger(
         self, car_a_df: pd.DataFrame, car_b_df: pd.DataFrame
     ) -> dict[str, Any]:
-        """Check if proximity between cars decreases by >30% in high-speed zone.
+        """Check if proximity between cars decreases by >30% in high-speed zone
+        or if cars are within time threshold.
 
         Args:
             car_a_df: Telemetry DataFrame for driver_a
@@ -181,11 +199,30 @@ class DriverAgnosticDetector:
         if a_segment.empty or b_segment.empty:
             return {"triggered": False, "reason": "No segment overlap"}
 
+        time_triggered = False
+        if "Time" in a_segment.columns and "Time" in b_segment.columns:
+            for _, a_row in a_segment.iterrows():
+                for _, b_row in b_segment.iterrows():
+                    time_diff = abs(
+                        self._timedelta_to_seconds(a_row["Time"])
+                        - self._timedelta_to_seconds(b_row["Time"])
+                    )
+                    if time_diff < self.PROXIMITY_TIME_THRESHOLD:
+                        time_triggered = True
+                        break
+                if time_triggered:
+                    break
+
         distances = []
         for _, a_row in a_segment.iterrows():
-            b_closest = b_segment.iloc[
+            if b_segment.empty:
+                continue
+            b_idx = (
                 (b_segment["DistanceOffset"] - a_row["DistanceOffset"]).abs().idxmin()
-            ]
+            )
+            if b_idx not in b_segment.index:
+                continue
+            b_closest = b_segment.loc[b_idx]
             dist = abs(a_row["DistanceOffset"] - b_closest["DistanceOffset"])
             distances.append(
                 {
@@ -214,7 +251,7 @@ class DriverAgnosticDetector:
         min_distance = high_speed_distances["distance_m"].min()
         decrease_pct = ((max_distance - min_distance) / max_distance) * 100
 
-        triggered = decrease_pct > self.PROXIMITY_THRESHOLD_PCT
+        triggered = decrease_pct > self.PROXIMITY_THRESHOLD_PCT or time_triggered
 
         return {
             "triggered": triggered,
@@ -223,7 +260,11 @@ class DriverAgnosticDetector:
             "max_distance_m": round(max_distance, 2),
             "min_distance_m": round(min_distance, 2),
             "high_speed_zone_kph": self.HIGH_SPEED_ZONE_THRESHOLD_KMH,
-            "reason": f"Distance decreased by {decrease_pct:.1f}%"
+            "time_threshold_s": self.PROXIMITY_TIME_THRESHOLD,
+            "time_proximity_triggered": time_triggered,
+            "reason": f"Time proximity <{self.PROXIMITY_TIME_THRESHOLD}s"
+            if time_triggered
+            else f"Distance decreased by {decrease_pct:.1f}%"
             if triggered
             else f"Distance decrease {decrease_pct:.1f}% below threshold",
         }
@@ -287,6 +328,71 @@ class DriverAgnosticDetector:
             else "No anomalies detected",
         }
 
+    def _check_speed_delta_braking(
+        self, car_a_df: pd.DataFrame, car_b_df: pd.DataFrame
+    ) -> dict[str, Any]:
+        """Check if speed delta between drivers exceeds threshold in braking zones.
+
+        Args:
+            car_a_df: Telemetry DataFrame for driver_a
+            car_b_df: Telemetry DataFrame for driver_b
+
+        Returns:
+            Dictionary with speed delta trigger results
+        """
+        if "Brake" not in car_a_df.columns or "Brake" not in car_b_df.columns:
+            return {
+                "triggered": False,
+                "reason": "No brake data available",
+            }
+
+        overlap = self._find_overlap_region(car_a_df, car_b_df)
+        if overlap is None:
+            return {"triggered": False, "reason": "No telemetry overlap"}
+
+        a_braking = car_a_df[
+            (car_a_df["Brake"] == True)
+            & (car_a_df["DistanceOffset"] >= overlap[0])
+            & (car_a_df["DistanceOffset"] <= overlap[1])
+        ]
+        b_braking = car_b_df[
+            (car_b_df["Brake"] == True)
+            & (car_b_df["DistanceOffset"] >= overlap[0])
+            & (car_b_df["DistanceOffset"] <= overlap[1])
+        ]
+
+        if a_braking.empty and b_braking.empty:
+            return {"triggered": False, "reason": "No braking zones in overlap"}
+
+        max_speed_delta = 0.0
+        max_delta_location = 0.0
+
+        for _, a_row in a_braking.iterrows():
+            if b_braking.empty:
+                continue
+            b_idx = (
+                (b_braking["DistanceOffset"] - a_row["DistanceOffset"]).abs().idxmin()
+            )
+            if b_idx not in b_braking.index:
+                continue
+            b_closest = b_braking.loc[b_idx]
+            speed_delta = abs(a_row["Speed"] - b_closest["Speed"])
+            if speed_delta > max_speed_delta:
+                max_speed_delta = speed_delta
+                max_delta_location = a_row["DistanceOffset"]
+
+        triggered = max_speed_delta > self.SPEED_DELTA_BRAKING_THRESHOLD
+
+        return {
+            "triggered": triggered,
+            "max_speed_delta_kph": round(max_speed_delta, 2),
+            "threshold_kph": self.SPEED_DELTA_BRAKING_THRESHOLD,
+            "location_offset": round(max_delta_location, 2),
+            "reason": f"Speed delta {max_speed_delta:.1f} km/h exceeds {self.SPEED_DELTA_BRAKING_THRESHOLD} km/h threshold"
+            if triggered
+            else f"Speed delta {max_speed_delta:.1f} km/h below threshold",
+        }
+
     def _prepare_brain_input(
         self,
         car_a_df: pd.DataFrame,
@@ -339,12 +445,14 @@ class DriverAgnosticDetector:
         self,
         proximity_trigger: dict[str, Any],
         anomaly_trigger: dict[str, Any],
+        speed_delta_trigger: dict[str, Any],
     ) -> dict[str, Any]:
         """Determine overall verdict based on triggers.
 
         Args:
             proximity_trigger: Results from proximity check
             anomaly_trigger: Results from anomaly detection
+            speed_delta_trigger: Results from speed delta braking check
 
         Returns:
             Verdict dictionary with summary and recommendations
@@ -357,8 +465,11 @@ class DriverAgnosticDetector:
         if anomaly_trigger.get("triggered"):
             violations.append(f"Anomaly violation: {anomaly_trigger['reason']}")
 
+        if speed_delta_trigger.get("triggered"):
+            violations.append(f"Speed delta violation: {speed_delta_trigger['reason']}")
+
         if violations:
-            verdict = "REVIEW_REQUIRED"
+            verdict = "INVESTIGATION"
             summary = "Incident triggers steward review based on objective telemetry criteria."
         else:
             verdict = "NO_INVESTIGATION"
@@ -370,6 +481,7 @@ class DriverAgnosticDetector:
             "summary": summary,
             "proximity_triggered": proximity_trigger.get("triggered", False),
             "anomaly_triggered": anomaly_trigger.get("triggered", False),
+            "speed_delta_triggered": speed_delta_trigger.get("triggered", False),
         }
 
     def _find_overlap_region(
