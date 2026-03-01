@@ -27,7 +27,7 @@ The car can't gaslight you. The data is the data.
 
 Behind every decision is a neural engine with a photographic memory for the rulebook.
 
-**3,725 indexed chunks** of the 2025 FIA Sporting and Technical Regulations, vectorized in FAISS and queried via Mistral 7B. This isn't a language model winging it—it's a legal database with an opinion.
+**3,725 indexed chunks** of the 2025 FIA Sporting and Technical Regulations, vectorized in FAISS and queried via `mistral-small-latest`. This isn't a language model winging it—it's a legal database with an opinion.
 
 The RAG engine doesn't *interpret*. It **cites**.
 
