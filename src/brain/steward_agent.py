@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import faiss
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+from mistralai import Mistral
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_INDEX_DIR = Path(__file__).resolve().parent / "fia_rules.index"
@@ -21,7 +27,110 @@ LEGAL_CONTEXT_PRIORITY_TERM = "Appendix L Chapter IV: Code of Driving Conduct"
 TRACK_LIMITS_ARTICLE = "Article 33.3"
 INCIDENTS_ARTICLE = "Article 54.3"
 
+MISTRAL_MODEL = "mistral-small-latest"
+
 SYSTEM_PROMPT = """You are an objective FIA Steward. You are being provided with anonymized telemetry for 'Driver A' and 'Driver B'. Ignore any historical context or driver reputation and judge solely on the 2025 Driving Standards Guidelines."""
+
+
+def _get_mistral_client():
+    """Get Mistral client from API key."""
+    api_key = os.environ.get("MISTRAL_API_KEY") or os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise ValueError("MISTRAL_API_KEY environment variable not set")
+    return Mistral(api_key=api_key)
+
+
+def _generate_llm_verdict(
+    incident_data: dict[str, Any],
+    features: dict[str, Any],
+    retrieved_docs: list[Document],
+    ruling: str,
+    reasons: list[str],
+) -> dict[str, Any]:
+    """Generate natural language verdict using Mistral LLM with RAG."""
+    try:
+        client = _get_mistral_client()
+    except Exception as e:
+        print(f"[LLM] Could not initialize Mistral client: {e}")
+        return None
+
+    driver = incident_data.get("driver", "UNKNOWN")
+    speed = incident_data.get("speed_kph", 0)
+    lateral_g = incident_data.get("lateral_g", 0)
+    sector = incident_data.get("sector", "UNKNOWN")
+    lap = incident_data.get("lap", 0)
+    incident_type = incident_data.get("incident_type", "unknown_incident")
+
+    rules_context = (
+        "\n\n".join(f"- {doc.page_content[:500]}" for doc in retrieved_docs[:3])
+        if retrieved_docs
+        else "No specific rules retrieved."
+    )
+
+    prompt = f"""You are an FIA Steward analyzing an F1 racing incident.
+
+TELEMETRY DATA:
+- Driver: {driver}
+- Speed: {speed} km/h
+- Lateral G-Force: {lateral_g}G
+- Sector: {sector}
+- Lap: {lap}
+- Incident Type: {incident_type}
+
+DETECTED FEATURES:
+- High lateral load: {features.get("high_lateral_load", False)}
+- Low clearance: {features.get("low_clearance", False)}
+- Collision signal: {features.get("collision_signal", False)}
+- Off-track signal: {features.get("off_track_signal", False)}
+
+RELEVANT FIA RULES:
+{rules_context}
+
+Based on the telemetry and FIA regulations, issue a verdict.
+
+Determine:
+1. RULING: PENALTY, INVESTIGATION, or NO_FURTHER_ACTION
+2. CITATION: The specific FIA article violated (e.g., "FIA International Sporting Code - Appendix L, Chapter IV, Article 2(d)")
+3. SUMMARY: A 1-2 sentence explanation of the decision
+
+Respond in JSON format:
+{{
+  "ruling": "PENALTY",
+  "article_cited": "FIA International Sporting Code - Appendix L, Chapter IV, Article 2(d)",
+  "rule_summary": "..."
+}}"""
+
+    try:
+        chat_response = client.chat.complete(
+            model=MISTRAL_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+
+        response_text = chat_response.choices[0].message.content
+        print(f"[LLM] Raw response: {response_text[:200]}...")
+
+        llm_result = json.loads(response_text)
+
+        return {
+            "ruling": llm_result.get("ruling", ruling),
+            "article_cited": llm_result.get(
+                "article_cited", "General Driving Standards"
+            ),
+            "rule_summary": llm_result.get(
+                "rule_summary", reasons[0] if reasons else "Incident analyzed."
+            ),
+            "judicial_verdict": f"Judicial Verdict: {llm_result.get('ruling', ruling)}. {llm_result.get('rule_summary', '')}",
+            "confidence_score": 0.92,
+        }
+
+    except Exception as e:
+        print(f"[LLM] Error generating verdict: {e}")
+        return None
 
 
 def _coerce_incident_json(incident_json: str | dict[str, Any]) -> dict[str, Any]:
@@ -539,7 +648,7 @@ def _decide_verdict(features: dict[str, Any]) -> tuple[str, list[str], float]:
         reasons.append(
             "Signals suggest a possible leaving-the-track or forcing-wide event."
         )
-    if features["lateral_g"] and features["lateral_g"] >= 3.7:
+    if features["lateral_g"] and features["lateral_g"] >= 3.75:
         severity += 5
         reasons.append(
             f"Very high lateral G-force ({features['lateral_g']:.1f}G) indicates significant cornering conflict or collision impact."
@@ -696,9 +805,41 @@ def run_steward_agent(
         for i, doc in enumerate(docs[:3]):
             src = doc.metadata.get("source", "unknown")
             print(f"  Doc {i + 1}: {src[:60]}...")
+    else:
+        print("[RETRIEVED] No docs returned from RAG")
 
     if not docs:
         ruling, reasons, confidence = _decide_verdict(features)
+
+        lateral_g = features.get("lateral_g", 0)
+        is_collision = lateral_g and lateral_g >= 3.75
+
+        llm_result = _generate_llm_verdict(
+            incident_data=incident_data,
+            features=features,
+            retrieved_docs=[],
+            ruling=ruling,
+            reasons=reasons,
+        )
+
+        if llm_result:
+            ruling = llm_result.get("ruling", ruling)
+            reasons = [
+                llm_result.get(
+                    "rule_summary", reasons[0] if reasons else "Incident analyzed."
+                )
+            ]
+            confidence = llm_result.get("confidence_score", confidence)
+            article_cited = llm_result.get("article_cited", "General Driving Standards")
+            rule_summary = llm_result.get("rule_summary", "Incident analyzed.")
+            print(f"[LLM] Fallback path - LLM verdict: ruling={ruling}")
+        else:
+            article_cited = "General Driving Standards"
+            rule_summary_text = (
+                reasons[0] if reasons else "High G-force event detected."
+            )
+            rule_summary = rule_summary_text
+
         fallback_payload = {
             "id": incident_data.get("id", "live-incident"),
             "sessionName": incident_data.get("sessionName")
@@ -721,8 +862,8 @@ def run_steward_agent(
             "track_temp_c": incident_data.get("track_temp_c"),
             "sector": incident_data.get("sector", "N/A"),
             "lap": incident_data.get("lap", 0),
-            "article_cited": "General Driving Standards",
-            "rule_summary": f"Incident flagged. {reasons[0] if reasons else 'High G-force event detected.'}",
+            "article_cited": article_cited,
+            "rule_summary": f"Incident flagged. {rule_summary}",
             "ruling": ruling,
             "verdict": ruling,
             "confidence_score": confidence,
@@ -742,14 +883,38 @@ def run_steward_agent(
 
     ruling, reasons, confidence = _decide_verdict(features)
 
+    llm_result = _generate_llm_verdict(
+        incident_data=incident_data,
+        features=features,
+        retrieved_docs=docs,
+        ruling=ruling,
+        reasons=reasons,
+    )
+
+    if llm_result:
+        ruling = llm_result.get("ruling", ruling)
+        reasons = [
+            llm_result.get(
+                "rule_summary", reasons[0] if reasons else "Incident analyzed."
+            )
+        ]
+        confidence = llm_result.get("confidence_score", confidence)
+        article_cited = llm_result.get(
+            "article_cited", citation if docs else "General Driving Standards"
+        )
+        rule_summary = llm_result.get("rule_summary", rule_summary)
+        print(f"[LLM] LLM verdict applied: ruling={ruling}, article={article_cited}")
+    else:
+        article_cited = citation if docs else "General Driving Standards"
+
     if (
-        citation
-        and citation != "FIA Rule Reference"
+        article_cited
+        and article_cited != "FIA Rule Reference"
         and features.get("high_lateral_load", False)
     ):
         ruling = "PENALTY"
         reasons.append(
-            f"Citation found ({citation}) with high lateral G-force - automatic penalty threshold."
+            f"Citation found ({article_cited}) with high lateral G-force - automatic penalty threshold."
         )
         confidence = max(confidence, 0.85)
 
@@ -787,13 +952,13 @@ def run_steward_agent(
 
     if (
         not conflict_detected
-        and citation != "FIA Rule Reference"
+        and article_cited != "FIA Rule Reference"
         and rule_summary != "Rule summary unavailable."
     ):
         confidence = max(confidence, 0.91)
 
     evidence_lines = [
-        f"Retrieved citation: {citation}",
+        f"Retrieved citation: {article_cited}",
         f"Rule text: {rule_summary}",
     ]
     evidence_lines.extend(reasons)
@@ -818,7 +983,7 @@ def run_steward_agent(
     )
 
     formatted_rule_summary = (
-        f"[{citation}] {rule_summary} | {incident_detail} | {ruling_reason}"
+        f"[{article_cited}] {rule_summary} | {incident_detail} | {ruling_reason}"
     )
 
     dashboard_payload = {
@@ -840,7 +1005,7 @@ def run_steward_agent(
         "track_temp_c": incident_data.get("track_temp_c"),
         "sector": incident_data.get("sector", "N/A"),
         "lap": incident_data.get("lap", 0),
-        "article_cited": citation,
+        "article_cited": article_cited,
         "rule_summary": formatted_rule_summary,
         "ruling": ruling,
         "verdict": ruling,
