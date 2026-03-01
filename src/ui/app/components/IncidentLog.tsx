@@ -12,18 +12,20 @@ export default function IncidentLog() {
   const [dismissInFlightIds, setDismissInFlightIds] = useState<Record<string, boolean>>({});
   const [error, setError] = useState<string | null>(null);
   const dismissTimeoutsRef = useRef<Record<string, number>>({});
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   const mutate = async (key: string) => {
-    if (key !== "/api/investigations") {
+    if (key !== "/api/telemetry") {
       return;
     }
 
-    const response = await fetch("/active_investigations.json", { cache: "no-store" });
+    const response = await fetch("/api/telemetry", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Investigation refresh failed (${response.status})`);
     }
 
-    const data = (await response.json()) as ActiveInvestigation[];
+    const json = (await response.json()) as { investigations: ActiveInvestigation[] };
+    const data = json.investigations ?? [];
     setInvestigations(Array.isArray(data) ? data : []);
   };
 
@@ -33,12 +35,13 @@ export default function IncidentLog() {
 
     const fetchInvestigations = async () => {
       try {
-        const response = await fetch("/active_investigations.json", { cache: "no-store" });
+        const response = await fetch("/api/telemetry", { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Investigation fetch failed (${response.status})`);
         }
 
-        const data = (await response.json()) as ActiveInvestigation[];
+        const json = (await response.json()) as { investigations: ActiveInvestigation[] };
+        const data = json.investigations ?? [];
         if (isMounted) {
           setInvestigations(Array.isArray(data) ? data : []);
           setError(null);
@@ -72,20 +75,29 @@ export default function IncidentLog() {
     setDismissInFlightIds((previous) => ({ ...previous, [id]: true }));
 
     const timeoutId = window.setTimeout(async () => {
-      try {
-        const response = await fetch(`/api/investigations/${encodeURIComponent(id)}`, {
-          method: "DELETE",
-        });
-        if (!response.ok) {
-          throw new Error(`Dismiss failed (${response.status})`);
-        }
+        try {
+          const response = await fetch(`/api/investigations/${encodeURIComponent(id)}`, {
+            method: "DELETE",
+          });
+          if (!response.ok) {
+            throw new Error(`Dismiss failed (${response.status})`);
+          }
 
-        await mutate("/api/investigations");
-        setError(null);
-      } catch (dismissError) {
-        setError(dismissError instanceof Error ? dismissError.message : "Unable to dismiss investigation");
-      } finally {
-        setDismissInFlightIds((previous) => {
+          await mutate("/api/investigations");
+          setInvestigations((previous) => previous.filter((entry) => entry.id !== id));
+          setClosedIds((previous) => {
+            if (!(id in previous)) {
+              return previous;
+            }
+            const next = { ...previous };
+            delete next[id];
+            return next;
+          });
+          setError(null);
+        } catch (dismissError) {
+          setError(dismissError instanceof Error ? dismissError.message : "Unable to dismiss investigation");
+        } finally {
+          setDismissInFlightIds((previous) => {
           const next = { ...previous };
           delete next[id];
           return next;
@@ -101,12 +113,24 @@ export default function IncidentLog() {
     () => investigations.filter((entry) => !closedIds[entry.id]).length,
     [closedIds, investigations]
   );
+  const orderedInvestigations = useMemo(() => [...investigations].reverse(), [investigations]);
+
+  useEffect(() => {
+    if (!scrollContainerRef.current) {
+      return;
+    }
+
+    scrollContainerRef.current.scrollTo({
+      top: scrollContainerRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [orderedInvestigations]);
 
   return (
     <aside className="race-panel h-full rounded-2xl border border-white/10 p-5 shadow-2xl shadow-black/40">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.22em] text-zinc-400">Incident History</p>
+          <p className="text-xs uppercase tracking-[0.22em] text-zinc-400">Incident Log</p>
           <h2 className="mt-2 text-xl font-semibold text-zinc-100">Active Investigations</h2>
         </div>
         <div className="rounded-full border border-[#FF1801]/40 bg-[#FF1801]/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-[#FF1801]">
@@ -116,15 +140,22 @@ export default function IncidentLog() {
 
       {error ? <p className="mt-4 text-sm text-red-300">{error}</p> : null}
 
-      <div className="mt-5 max-h-[62vh] space-y-4 overflow-y-auto pr-1">
-        {investigations.length === 0 ? (
+      <div ref={scrollContainerRef} className="mt-5 max-h-[82vh] space-y-4 overflow-y-auto pr-1">
+        {orderedInvestigations.length === 0 ? (
           <div className="rounded-xl border border-white/10 bg-black/30 p-4 text-sm text-zinc-400">
             No investigations in the log.
           </div>
         ) : (
-          investigations.map((entry) => {
+          orderedInvestigations.map((entry) => {
             const isClosed = closedIds[entry.id] === true;
             const isDismissing = dismissInFlightIds[entry.id] === true;
+            const ruling = entry.ruling;
+            const article_cited = entry.article_cited;
+            const rule_summary = entry.rule_summary;
+            const hasValidRuling = ruling && ruling.trim().length > 0;
+            const verdictText = hasValidRuling ? ruling : "Awaiting Verdict...";
+            const articleText = article_cited && article_cited.trim().length > 0 && !article_cited.includes("Awaiting") ? article_cited : "Awaiting Verdict...";
+            const summaryText = rule_summary && rule_summary.trim().length > 0 && !rule_summary.includes("Awaiting") ? rule_summary : "Awaiting Verdict...";
             return (
               <article
                 key={entry.id}
@@ -140,8 +171,14 @@ export default function IncidentLog() {
                       {entry.timestamp}
                     </p>
                     <h3 className="mt-1 text-base font-semibold text-zinc-100">
-                      {entry.driver} | Lap {entry.lap}
+                      Verdict Card | Lap {entry.lap}
                     </h3>
+                    {(entry.driver_a || entry.driver_b) && (
+                      <p className="mt-1 text-xs font-medium text-amber-400">
+                        {entry.driver_a}
+                        {entry.driver_b && ` vs ${entry.driver_b}`}
+                      </p>
+                    )}
                   </div>
                   <button
                     type="button"
@@ -157,17 +194,22 @@ export default function IncidentLog() {
                   </button>
                 </div>
 
-                <p className="mt-3 text-sm leading-relaxed text-zinc-300">{entry.incident_description}</p>
-
-                <div className="mt-3 grid gap-2 text-xs text-zinc-400 sm:grid-cols-2">
-                  <p>Type: {entry.incident_type}</p>
-                  <p>Speed: {entry.speed_kph.toFixed(1)} km/h</p>
-                  <p>Lateral G: {entry.lateral_g.toFixed(2)}G</p>
-                  <p>Confidence: {entry.confidence_score}%</p>
+                <div className="mt-5 space-y-4 text-sm text-zinc-200">
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Verdict</p>
+                    <p className="text-lg font-semibold uppercase text-zinc-100">{verdictText}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">
+                      Article Cited <span className="text-[10px] font-normal text-zinc-500">(legal basis)</span>
+                    </p>
+                    <p className="text-lg font-bold text-[#FF1801]">{articleText}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] uppercase tracking-[0.22em] text-zinc-500">Summary</p>
+                    <p className="max-h-[150px] overflow-y-auto text-sm leading-relaxed text-zinc-300">{summaryText}</p>
+                  </div>
                 </div>
-
-                <p className="mt-3 text-xs text-zinc-500">Article: {entry.article_cited}</p>
-                <p className="mt-1 text-xs text-zinc-500">Ruling: {entry.ruling}</p>
 
                 <button
                   type="button"

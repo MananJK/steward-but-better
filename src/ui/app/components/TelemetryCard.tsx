@@ -87,6 +87,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
   }, []);
 
   const displayedPayload = inquiryPayload ?? livePayload;
+  const liveSector = livePayload?.sector;
 
   const currentFact = useMemo(() => {
     if (!displayedPayload) {
@@ -107,7 +108,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       speedKph: displayedPayload.speed_kph ?? 0,
       deltaToLeader: displayedPayload.delta_to_leader ?? displayedPayload.apex_gap ?? 0,
       trackTempC: displayedPayload.track_temp_c ?? 0,
-      sector: displayedPayload.sector ?? "N/A",
+      sector: liveSector ?? displayedPayload.sector ?? "N/A",
       incident: displayedPayload.incident_description ?? displayedPayload.incident_type ?? "No incident details.",
       confidence: Math.max(0, Math.min(100, confidence)),
       fiaArticle: displayedPayload.article_cited ?? "Awaiting Article",
@@ -115,7 +116,7 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
       ruling: displayedPayload.ruling ?? displayedPayload.verdict ?? "Pending",
       triggerSteward: displayedPayload.trigger_steward === true,
     } satisfies IncidentFact;
-  }, [displayedPayload]);
+  }, [displayedPayload, liveSector]);
 
   const sessionName = displayedPayload?.sessionName ?? displayedPayload?.track ?? EMPTY_UPDATE.sessionName;
   const recentJudgements = useMemo(
@@ -191,7 +192,11 @@ export default function TelemetryCard({ onTelemetryUpdate }: TelemetryCardProps)
 
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
         <Metric label="Driver" value={currentFact?.driver ?? "--"} />
-        <Metric label="Incident Type" value={currentFact?.incidentType ?? "--"} />
+        <Metric
+          label="Incident Type"
+          value={(currentFact?.incidentType ?? "--").replace(/_/g, ' ')}
+          valueClassName="capitalize"
+        />
         <Metric label="Lap" value={currentFact ? `Lap ${currentFact.lap}` : "--"} />
         <Metric
           label="Speed"
@@ -242,13 +247,14 @@ type MetricProps = {
   value: string;
   accent?: boolean;
   pulse?: boolean;
+  valueClassName?: string;
 };
 
-function Metric({ label, value, accent, pulse }: MetricProps) {
+function Metric({ label, value, accent, pulse, valueClassName }: MetricProps) {
   return (
     <div className="rounded-xl border border-white/5 bg-black/30 p-3">
       <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">{label}</p>
-      <p className={`mt-1 text-sm font-semibold ${pulse ? "animate-pulse text-zinc-300" : accent ? "text-[#FF1801]" : "text-zinc-100"}`}>{value}</p>
+      <p className={`mt-1 text-sm font-semibold ${pulse ? "animate-pulse text-zinc-300" : accent ? "text-[#FF1801]" : "text-zinc-100"} ${valueClassName ?? ""}`}>{value}</p>
     </div>
   );
 }
