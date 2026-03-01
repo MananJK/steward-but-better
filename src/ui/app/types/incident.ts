@@ -40,6 +40,31 @@ export type LiveIncidentPayload = {
   verdict?: string;
   trigger_steward?: boolean;
   recentJudgements?: string[];
+  all_drivers?: Array<{
+    driver_code?: string;
+    driver_number?: string;
+    position_rank?: number;
+    lap?: number;
+    lap_number?: number;
+    current_speed?: number;
+    speed?: number;
+    distance_offset?: number;
+    lateral_g?: number;
+    sector?: string;
+    delta_to_leader?: number;
+    incident_detected?: boolean;
+  }> | Record<string, {
+    speed?: number;
+    current_speed?: number;
+    position_rank?: number;
+    lap?: number;
+    lap_number?: number;
+    distance_offset?: number;
+    lateral_g?: number;
+    sector?: string;
+    delta_to_leader?: number;
+    incident_detected?: boolean;
+  }>;
 };
 
 export type ActiveInvestigation = {
@@ -55,4 +80,6 @@ export type ActiveInvestigation = {
   ruling: string;
   confidence_score: number;
   article_cited: string;
+  driver_a?: string;
+  driver_b?: string;
 };
