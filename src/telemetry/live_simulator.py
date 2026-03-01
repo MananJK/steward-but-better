@@ -28,7 +28,7 @@ class LiveSimulator:
     """Simulates real-time F1 telemetry broadcast."""
 
     API_ENDPOINT = "http://localhost:3000/api/telemetry"
-    G_FORCE_THRESHOLD = 3.7
+    G_FORCE_THRESHOLD = 3.75
     COOLDOWN_PACKETS = 5
 
     def __init__(self, cache_enabled: bool = True) -> None:
@@ -50,6 +50,9 @@ class LiveSimulator:
         self._processed_gforce_incidents: set[str] = set()
         self._incident_cooldowns: dict[str, float] = {}
         self.INCIDENT_COOLDOWN_SECONDS = 10.0
+        self._last_driver_speeds: dict[str, float] = {}
+        self._high_g_incident_count: dict[str, int] = {}
+        self._demo_only_third_incident = True
 
         self._purge_old_files()
 
@@ -81,6 +84,8 @@ class LiveSimulator:
         self._gap_tracking.clear()
         self._delta_history.clear()
         self._incident_cooldowns.clear()
+        self._last_driver_speeds.clear()
+        self._high_g_incident_count.clear()
 
     def _generate_incident_id(
         self, lap_number: int, sector: str, driver_a: str, driver_b: str
@@ -927,17 +932,32 @@ class LiveSimulator:
         lateral_g_val = float(packet.get("lateral_g", 0))
         trigger_steward = lateral_g_val > self.G_FORCE_THRESHOLD
         high_g_driver = None
+        current_speed = float(packet.get("speed", 0))
 
         if not trigger_steward:
             for driver_data in packet.get("all_drivers", []):
                 driver_lateral_g = float(driver_data.get("lateral_g", 0))
+                driver_speed = float(
+                    driver_data.get("speed", 0) or driver_data.get("current_speed", 0)
+                )
+                driver_code = driver_data.get("driver_code")
+
+                prev_speed = self._last_driver_speeds.get(driver_code, driver_speed)
+                speed_drop = prev_speed - driver_speed if prev_speed > 0 else 0
+                self._last_driver_speeds[driver_code] = driver_speed
+
                 if driver_lateral_g > self.G_FORCE_THRESHOLD:
-                    self._logger.info(
-                        f"High G-Force detected on {driver_data.get('driver_code')}: {driver_lateral_g:.2f}G"
-                    )
-                    high_g_driver = driver_data.get("driver_code")
-                    trigger_steward = True
-                    break
+                    speed_drop_threshold = 50
+
+                    if speed_drop >= speed_drop_threshold:
+                        self._logger.info(
+                            f"CRASH DETECTED: {driver_code} - G={driver_lateral_g:.2f}, speed dropped {speed_drop:.0f} km/h"
+                        )
+                        high_g_driver = driver_code
+                        high_g_speed = driver_speed
+                        high_g_speed_drop = speed_drop
+                        trigger_steward = True
+                        break
 
         if trigger_steward and not packet.get("agnostic_incident"):
             packet["driver_a"] = high_g_driver or packet.get("driver")
