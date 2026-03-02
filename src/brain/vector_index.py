@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from huggingface_hub import InferenceClient
 DEFAULT_RULES_DIR = Path("processed_rules")
 DEFAULT_INDEX_FILE = Path("src/brain/fia_rules.index")
 DEFAULT_PROGRESS_FILE = Path("src/brain/indexing_progress.json")
-HF_API_KEY = "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"
+HF_API_KEY = os.getenv("HF_API_KEY")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 YEAR_PATTERN = re.compile(r"^(19|20)\d{2}$")
 IGNORED_CATEGORY_PARTS = {"rules", "processed_rules", "documents", "fia"}
