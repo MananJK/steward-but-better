@@ -22,13 +22,24 @@ import pandas as pd
 import requests
 
 from driver_agnostic_detector import DriverAgnosticDetector
+from telemetry_utils import (
+    compute_g_forces,
+    ensure_time_seconds,
+    merge_position_channels,
+    timedelta_to_seconds,
+)
 
 
 class LiveSimulator:
     """Simulates real-time F1 telemetry broadcast."""
 
     API_ENDPOINT = "http://localhost:3000/api/telemetry"
-    G_FORCE_THRESHOLD = 3.75
+    # Real F1 cornering regularly reaches 4-6G lateral, so a crash-class
+    # trigger needs to sit above normal cornering loads. A sustained reading
+    # at/above this level, or a large speed drop between packets, marks a
+    # crash-class event.
+    G_FORCE_THRESHOLD = 5.0
+    SPEED_DROP_THRESHOLD_KPH = 50.0
     COOLDOWN_PACKETS = 5
 
     def __init__(self, cache_enabled: bool = True) -> None:
@@ -54,38 +65,10 @@ class LiveSimulator:
         self._high_g_incident_count: dict[str, int] = {}
         self._demo_only_third_incident = True
 
-        self._purge_old_files()
-
         if cache_enabled:
-            cache_dir = Path("f1_cache")
+            cache_dir = Path(__file__).parent / "f1_cache"
             cache_dir.mkdir(exist_ok=True)
             fastf1.Cache.enable_cache(cache_dir)
-
-    def _purge_old_files(self) -> None:
-        """Delete old incident files on startup to prevent ghost data."""
-        import os
-
-        ui_public = Path(__file__).parent.parent / "ui" / "public"
-        files_to_purge = [
-            ui_public / "live_incident.json",
-            ui_public / "active_investigations.json",
-            ui_public / "current_inquiry.json",
-        ]
-        for f in files_to_purge:
-            if f.exists():
-                try:
-                    f.unlink()
-                    self._logger.info(f"Purged old file: {f}")
-                except Exception as e:
-                    self._logger.warning(f"Could not purge {f}: {e}")
-
-        self._processed_gforce_incidents.clear()
-        self.active_investigations.clear()
-        self._gap_tracking.clear()
-        self._delta_history.clear()
-        self._incident_cooldowns.clear()
-        self._last_driver_speeds.clear()
-        self._high_g_incident_count.clear()
 
     def _generate_incident_id(
         self, lap_number: int, sector: str, driver_a: str, driver_b: str
@@ -383,23 +366,18 @@ class LiveSimulator:
                 else:
                     df[channel] = telemetry[channel].values
 
-        if "Position" in telemetry.columns:
+        # Merge X/Y (and Position) from pos_data for the lap window; the
+        # physics layer needs real positions to compute lateral G.
+        pos_data = self._session.pos_data.get(driver_number)
+        if pos_data is not None and not pos_data.empty:
+            pos_mask = (pos_data["SessionTime"] >= lap_start) & (
+                pos_data["SessionTime"] <= lap_end
+            )
+            pos_lap = pos_data[pos_mask]
+            if not pos_lap.empty:
+                df = merge_position_channels(df, pos_lap, on="SessionTime")
+        elif "Position" in telemetry.columns:
             df["Position"] = telemetry["Position"].values
-        else:
-            pos_data = self._session.pos_data.get(driver_number)
-            if pos_data is not None:
-                pos_mask = (pos_data["SessionTime"] >= lap_start) & (
-                    pos_data["SessionTime"] <= lap_end
-                )
-                pos_lap = pos_data[pos_mask].reset_index(drop=True)
-                df = df.reset_index(drop=True)
-                if "Position" in pos_lap.columns and len(pos_lap) > 0 and len(df) > 0:
-                    df = pd.merge_asof(
-                        df.sort_values("SessionTime"),
-                        pos_lap[["SessionTime", "Position"]].sort_values("SessionTime"),
-                        on="SessionTime",
-                        direction="nearest",
-                    )
 
         if "Distance" in df.columns and not df["Distance"].empty:
             distance_values = df["Distance"].values
@@ -504,6 +482,8 @@ class LiveSimulator:
         df["DriverNumber"] = driver_number
         df["LapNumber"] = lap_number
 
+        ensure_time_seconds(df)
+
         if len(df) > 0:
             self._logger.info(
                 f"Driver {driver_code}: Final telemetry has {len(df)} rows, "
@@ -553,7 +533,7 @@ class LiveSimulator:
             if not time_col:
                 continue
 
-            time_seconds = df[time_col].apply(self._timedelta_to_seconds)
+            time_seconds = self._time_series(df, time_col)
             closest_idx = (time_seconds - time_val).abs().idxmin()
             row = df.loc[closest_idx]
 
@@ -608,52 +588,25 @@ class LiveSimulator:
         return round(time_delta, 3)
 
     def _calculate_g_forces(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate lateral and longitudinal G-forces from telemetry.
+        """Compute real G-forces from position/speed data (see telemetry_utils).
 
-        Args:
-            df: Telemetry DataFrame with Speed and Time columns.
-
-        Returns:
-            DataFrame with added lateral_g and longitudinal_g columns.
+        Lateral G requires X/Y position channels (merged from pos_data);
+        without them only longitudinal G is derivable and lateral is 0.
         """
-        if df.empty or "Speed" not in df.columns:
-            df["lateral_g"] = 0.0
-            df["longitudinal_g"] = 0.0
-            return df
+        return compute_g_forces(df)
 
-        speed_kmh = df["Speed"].values
-        speed_ms = speed_kmh / 3.6
+    def _time_series(self, df: pd.DataFrame, col: str = "Time") -> pd.Series:
+        """Float seconds for a time column, using the precomputed cache when present."""
+        if "TimeSeconds" in df.columns and col in ("Time", "TimeSeconds"):
+            return df["TimeSeconds"]
+        if col not in df.columns:
+            return df["Time"].apply(timedelta_to_seconds)
+        return df[col].apply(timedelta_to_seconds)
 
-        if "Time" in df.columns and len(df) > 1:
-            time_values = df["Time"].values
-            dt = np.diff(time_values)
-            dt = np.insert(dt, 0, dt[0] if len(dt) > 0 else 0.01)
-
-            acceleration_ms2 = np.gradient(speed_ms, time_values)
-            df["longitudinal_g"] = np.abs(acceleration_ms2) / 9.81
-        else:
-            df["longitudinal_g"] = 0.0
-
-        speed_changes = np.diff(speed_ms)
-        direction_changes = np.abs(
-            np.diff(np.arctan2(speed_changes, np.ones_like(speed_changes)))
-        )
-        lateral_accel = np.zeros(len(df))
-        for i in range(1, len(df)):
-            if i < len(speed_changes) + 1:
-                corner_radius = 30.0
-                lateral_accel[i] = (
-                    (speed_ms[i] ** 2) / (9.81 * corner_radius)
-                    if corner_radius > 0
-                    else 0
-                )
-
-        base_lateral = 2.0
-        lateral_g = base_lateral + np.abs(np.sin(np.arange(len(df)) / 10)) * 2.0
-        lateral_g = np.clip(lateral_g, 0.0, 6.0)
-        df["lateral_g"] = lateral_g
-
-        return df
+    def _closest_row_at_time(self, df: pd.DataFrame, time_val: float) -> pd.Series:
+        """Row of df closest to time_val (seconds)."""
+        time_seconds = self._time_series(df)
+        return df.loc[(time_seconds - time_val).abs().idxmin()]
 
     def find_apex(self, df: pd.DataFrame) -> dict:
         """Find the apex (minimum speed point) in the telemetry."""
@@ -734,9 +687,7 @@ class LiveSimulator:
         df = telemetry_data[primary_driver]
 
         if "Time" in df.columns:
-            time_seconds = df["Time"].apply(self._timedelta_to_seconds)
-            closest_idx = (time_seconds - time_val).abs().idxmin()
-            row = df.loc[closest_idx]
+            row = self._closest_row_at_time(df, time_val)
         else:
             idx = min(packet_index, len(df) - 1)
             row = df.iloc[idx]
@@ -806,9 +757,7 @@ class LiveSimulator:
                 continue
 
             if "Time" in df.columns:
-                time_seconds = df["Time"].apply(self._timedelta_to_seconds)
-                closest_idx = (time_seconds - time_val).abs().idxmin()
-                driver_row = df.loc[closest_idx]
+                driver_row = self._closest_row_at_time(df, time_val)
             else:
                 idx = min(packet_index, len(df) - 1)
                 driver_row = df.iloc[idx]
@@ -842,11 +791,7 @@ class LiveSimulator:
                     if other_code == driver_code:
                         continue
                     if "Time" in other_df.columns:
-                        other_time_seconds = other_df["Time"].apply(
-                            self._timedelta_to_seconds
-                        )
-                        other_idx = (other_time_seconds - time_val).abs().idxmin()
-                        other_row = other_df.loc[other_idx]
+                        other_row = self._closest_row_at_time(other_df, time_val)
                         other_lap = int(other_row.get("LapNumber", 1))
                         other_dist = float(other_row.get("DistanceOffset", 0.0))
                         other_total_distance = (other_lap - 1) * 5500 + other_dist
@@ -932,30 +877,30 @@ class LiveSimulator:
         lateral_g_val = float(packet.get("lateral_g", 0))
         trigger_steward = lateral_g_val > self.G_FORCE_THRESHOLD
         high_g_driver = None
-        current_speed = float(packet.get("speed", 0))
+
+        # Track last-known speeds for every driver on every packet so crash
+        # detection sees consecutive-packet deltas even when the primary
+        # driver already triggered.
+        for driver_data in packet.get("all_drivers", []):
+            driver_code = driver_data.get("driver_code")
+            driver_speed = float(driver_data.get("current_speed", 0))
+            self._last_driver_speeds[driver_code] = driver_speed
 
         if not trigger_steward:
             for driver_data in packet.get("all_drivers", []):
                 driver_lateral_g = float(driver_data.get("lateral_g", 0))
-                driver_speed = float(
-                    driver_data.get("speed", 0) or driver_data.get("current_speed", 0)
-                )
+                driver_speed = float(driver_data.get("current_speed", 0))
                 driver_code = driver_data.get("driver_code")
 
                 prev_speed = self._last_driver_speeds.get(driver_code, driver_speed)
                 speed_drop = prev_speed - driver_speed if prev_speed > 0 else 0
-                self._last_driver_speeds[driver_code] = driver_speed
 
                 if driver_lateral_g > self.G_FORCE_THRESHOLD:
-                    speed_drop_threshold = 50
-
-                    if speed_drop >= speed_drop_threshold:
+                    if speed_drop >= self.SPEED_DROP_THRESHOLD_KPH:
                         self._logger.info(
                             f"CRASH DETECTED: {driver_code} - G={driver_lateral_g:.2f}, speed dropped {speed_drop:.0f} km/h"
                         )
                         high_g_driver = driver_code
-                        high_g_speed = driver_speed
-                        high_g_speed_drop = speed_drop
                         trigger_steward = True
                         break
 
@@ -997,8 +942,6 @@ class LiveSimulator:
 
         packet["all_drivers"] = packet.get("all_drivers", [])
 
-        self._write_live_incident(telemetry_data, driver, time_val, packet)
-
         if packet.get("trigger_steward"):
             self.last_steward_trigger_time[driver] = current_time
             lateral_g_val = float(packet.get("lateral_g", 0))
@@ -1032,9 +975,7 @@ class LiveSimulator:
 
         def get_driver_distance(df, time_val):
             if "Time" in df.columns:
-                time_seconds = df["Time"].apply(self._timedelta_to_seconds)
-                closest_idx = (time_seconds - time_val).abs().idxmin()
-                row = df.loc[closest_idx]
+                row = self._closest_row_at_time(df, time_val)
             else:
                 row = df.iloc[0]
             lap_num = int(row.get("LapNumber", 1))
@@ -1065,13 +1006,8 @@ class LiveSimulator:
                     distance_history.pop(0)
 
                 if "Time" in df_a.columns and "Time" in df_b.columns:
-                    time_seconds_a = df_a["Time"].apply(self._timedelta_to_seconds)
-                    time_seconds_b = df_b["Time"].apply(self._timedelta_to_seconds)
-                    closest_idx_a = (time_seconds_a - time_val).abs().idxmin()
-                    closest_idx_b = (time_seconds_b - time_val).abs().idxmin()
-
-                    row_a = df_a.iloc[closest_idx_a]
-                    row_b = df_b.iloc[closest_idx_b]
+                    row_a = self._closest_row_at_time(df_a, time_val)
+                    row_b = self._closest_row_at_time(df_b, time_val)
 
                     speed_a = float(row_a.get("Speed", 0))
                     speed_b = float(row_b.get("Speed", 0))
@@ -1155,169 +1091,6 @@ class LiveSimulator:
             all_incidents = all_incidents[:5]
 
         return all_incidents[0]
-
-    def _write_live_incident(
-        self,
-        telemetry_data: dict[str, pd.DataFrame],
-        primary_driver: str,
-        time_val: float,
-        packet: dict,
-    ) -> None:
-        """Write current telemetry state to live_incident.json for frontend display."""
-        if self._session is None:
-            return
-
-        drivers_output = []
-
-        for _, driver_row in self._session.results.iterrows():
-            driver_code = driver_row.get("Abbreviation", "")
-            driver_number = str(driver_row.get("DriverNumber", ""))
-
-            if driver_code not in telemetry_data:
-                drivers_output.append(
-                    {
-                        "driver": driver_code,
-                        "driver_number": driver_number,
-                        "speed_kph": None,
-                        "lap": None,
-                        "sector": None,
-                        "delta_to_leader": None,
-                        "position_rank": 0,
-                        "status": self._driver_status.get(driver_code, "DNF"),
-                    }
-                )
-                continue
-
-            df = telemetry_data[driver_code]
-            if df is None or df.empty:
-                drivers_output.append(
-                    {
-                        "driver": driver_code,
-                        "driver_number": driver_number,
-                        "speed_kph": None,
-                        "lap": None,
-                        "sector": None,
-                        "delta_to_leader": None,
-                        "position_rank": 0,
-                        "status": self._driver_status.get(driver_code, "DNF"),
-                    }
-                )
-                continue
-
-            if "Time" in df.columns:
-                time_seconds = df["Time"].apply(self._timedelta_to_seconds)
-                closest_idx = (time_seconds - time_val).abs().idxmin()
-                row = df.loc[closest_idx]
-            else:
-                row = df.iloc[0]
-
-            lap_number = int(row.get("LapNumber", 0))
-            sector = str(row.get("Sector", "S3"))
-            speed = round(float(row.get("Speed", 0.0)), 1)
-
-            delta = self.get_delta(telemetry_data, driver_code, time_val)
-            delta_value = float(round(delta, 3)) if delta is not None else None
-
-            if driver_code in telemetry_data:
-                df = telemetry_data[driver_code]
-                if "AbsoluteDistance" in df.columns and "Time" in df.columns:
-                    time_seconds = df["Time"].apply(self._timedelta_to_seconds)
-                    closest_idx = (time_seconds - time_val).abs().idxmin()
-                    row_at_time = df.loc[closest_idx]
-                    abs_dist_val = row_at_time.get("AbsoluteDistance", 0)
-                    self._logger.debug(
-                        f"Driver {driver_code}: abs_distance={abs_dist_val}, delta={delta_value}"
-                    )
-
-            position_time = self._timedelta_to_seconds(row.get("SessionTime", time_val))
-            timing_position = self._get_position_at_time(driver_number, position_time)
-
-            if timing_position is None:
-                driver_lap_for_pos = int(row.get("LapNumber", 1))
-                driver_abs_dist = float(row.get("AbsoluteDistance", 0.0))
-                total_race_distance = (driver_lap_for_pos - 1) * 5500 + driver_abs_dist
-
-                if total_race_distance > 0:
-                    position_rank = 1
-                    for other_driver, other_df in telemetry_data.items():
-                        if other_driver == driver_code:
-                            continue
-                        if (
-                            "Time" in other_df.columns
-                            and "AbsoluteDistance" in other_df.columns
-                        ):
-                            other_time_seconds = other_df["Time"].apply(
-                                self._timedelta_to_seconds
-                            )
-                            other_idx = (other_time_seconds - time_val).abs().idxmin()
-                            other_row = other_df.loc[other_idx]
-                            other_lap = int(other_row.get("LapNumber", 1))
-                            other_abs_dist = float(
-                                other_row.get("AbsoluteDistance", 0.0)
-                            )
-                            other_total_distance = (
-                                other_lap - 1
-                            ) * 5500 + other_abs_dist
-                            if other_total_distance > total_race_distance:
-                                position_rank += 1
-                else:
-                    position_rank = 0
-            else:
-                position_rank = timing_position
-
-            self._logger.debug(
-                f"Driver {driver_code}: speed={speed}, position_rank={position_rank}, "
-                f"timing_position={timing_position}, delta={delta_value}"
-            )
-
-            is_on_track = speed > 0 and position_rank > 0
-            status = "ACTIVE" if is_on_track else "OUT"
-
-            drivers_output.append(
-                {
-                    "driver": driver_code,
-                    "driver_number": driver_number,
-                    "speed_kph": speed if is_on_track else None,
-                    "lap": lap_number if is_on_track else None,
-                    "sector": sector if is_on_track else None,
-                    "delta_to_leader": delta_value if is_on_track else None,
-                    "position_rank": position_rank if is_on_track else 0,
-                    "status": status,
-                }
-            )
-
-        import os
-
-        output_file = (
-            Path(__file__).parent.parent / "ui" / "public" / "live_incident.json"
-        )
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-
-        temp_file = output_file.with_suffix(".tmp")
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                with open(temp_file, "w") as f:
-                    json.dump(drivers_output, f, indent=2)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(temp_file, output_file)
-                break
-            except PermissionError as e:
-                if attempt < max_retries - 1:
-                    self._logger.warning(
-                        f"File locked, retrying ({attempt + 1}/{max_retries})"
-                    )
-                    time.sleep(0.1)
-                else:
-                    self._logger.error(
-                        f"Failed to write live_incident.json after {max_retries} attempts: {e}"
-                    )
-                    try:
-                        temp_file.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-        self._logger.info(f"Wrote live_incident.json ({len(drivers_output)} drivers)")
 
     def _serialize_packet(self, packet: dict) -> dict:
         """Serialize packet for JSON, converting numpy types to Python types."""
@@ -1436,18 +1209,15 @@ def main():
     args = parser.parse_args()
 
     if args.clear_cache:
-        cache_dir = Path("f1_cache")
+        cache_dir = Path(__file__).parent / "f1_cache"
         if cache_dir.exists():
             import shutil
 
             shutil.rmtree(cache_dir)
-            cache_dir.mkdir(exist_ok=True)
-            logger.info("Cache cleared via shutil")
+        cache_dir.mkdir(exist_ok=True)
+        logger.info("Cache cleared")
 
     simulator = LiveSimulator(cache_enabled=True)
-
-    if args.clear_cache:
-        fastf1.Cache.clear_cache()
 
     logger.info("=" * 60)
     logger.info("F1 Live Telemetry Simulator")

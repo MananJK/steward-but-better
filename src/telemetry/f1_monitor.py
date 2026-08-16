@@ -29,7 +29,7 @@ class TelemetryExtractor:
         """
         self._logger = logging.getLogger(__name__)
         if cache_enabled:
-            cache_dir = Path("f1_cache")
+            cache_dir = Path(__file__).parent / "f1_cache"
             cache_dir.mkdir(exist_ok=True)
             fastf1.Cache.enable_cache(cache_dir)
         self._session = None

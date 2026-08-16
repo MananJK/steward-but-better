@@ -17,6 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from telemetry_utils import compute_g_forces, find_overlap_region, timedelta_to_seconds
+
 
 class DriverAgnosticDetector:
     """Driver-agnostic incident detector for F1 telemetry."""
@@ -30,16 +32,6 @@ class DriverAgnosticDetector:
     def __init__(self) -> None:
         self._logger = logging.getLogger(__name__)
         self._corner_profiles: dict[str, dict[str, float]] = {}
-
-    def _timedelta_to_seconds(self, td: Any) -> float:
-        """Convert timedelta64 to float seconds."""
-        if td is None:
-            return 0.0
-        if hasattr(td, "total_seconds"):
-            return td.total_seconds()
-        if hasattr(td, "item"):
-            return float(td.item()) / 1e9
-        return float(td)
 
     def analyze_incident(
         self,
@@ -102,26 +94,13 @@ class DriverAgnosticDetector:
         }
 
     def _calculate_g_forces(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate lateral G-forces from telemetry."""
-        if df.empty or "Speed" not in df.columns:
-            df["lateral_g"] = 0.0
-            return df
+        """Compute real G-forces via telemetry_utils.
 
-        speed_kmh = df["Speed"].values
-        speed_ms = speed_kmh / 3.6
-
-        corner_radius = 30.0
-        lateral_g = np.zeros(len(df))
-        for i in range(len(df)):
-            if speed_ms[i] > 0 and corner_radius > 0:
-                lateral_g[i] = (speed_ms[i] ** 2) / (9.81 * corner_radius)
-
-        base_lateral = 2.0
-        lateral_g = base_lateral + np.abs(np.sin(np.arange(len(df)) / 10)) * 2.0
-        lateral_g = np.clip(lateral_g, 0.0, 6.0)
-        df["lateral_g"] = lateral_g
-
-        return df
+        Lateral G requires X/Y position channels; without them lateral is 0
+        and the anomaly trigger honestly stays silent rather than firing on
+        fabricated values.
+        """
+        return compute_g_forces(df)
 
     def _build_corner_profiles(
         self, car_a_df: pd.DataFrame, car_b_df: pd.DataFrame
@@ -183,7 +162,7 @@ class DriverAgnosticDetector:
         Returns:
             Dictionary with trigger status and details
         """
-        overlap = self._find_overlap_region(car_a_df, car_b_df)
+        overlap = find_overlap_region(car_a_df, car_b_df)
         if overlap is None:
             return {"triggered": False, "reason": "No telemetry overlap"}
 
@@ -199,39 +178,56 @@ class DriverAgnosticDetector:
         if a_segment.empty or b_segment.empty:
             return {"triggered": False, "reason": "No segment overlap"}
 
+        # Time proximity means the two cars pass the SAME point on track
+        # within the threshold of each other (matched by distance), not that
+        # any two arbitrary samples happen to be close in session time.
         time_triggered = False
+        min_time_gap = None
         if "Time" in a_segment.columns and "Time" in b_segment.columns:
             for _, a_row in a_segment.iterrows():
-                for _, b_row in b_segment.iterrows():
-                    time_diff = abs(
-                        self._timedelta_to_seconds(a_row["Time"])
-                        - self._timedelta_to_seconds(b_row["Time"])
-                    )
-                    if time_diff < self.PROXIMITY_TIME_THRESHOLD:
-                        time_triggered = True
-                        break
-                if time_triggered:
+                b_idx = (
+                    (b_segment["DistanceOffset"] - a_row["DistanceOffset"])
+                    .abs()
+                    .idxmin()
+                )
+                b_closest = b_segment.loc[b_idx]
+                time_gap = abs(
+                    timedelta_to_seconds(a_row["Time"])
+                    - timedelta_to_seconds(b_closest["Time"])
+                )
+                if min_time_gap is None or time_gap < min_time_gap:
+                    min_time_gap = time_gap
+                if time_gap < self.PROXIMITY_TIME_THRESHOLD:
+                    time_triggered = True
                     break
 
         distances = []
-        for _, a_row in a_segment.iterrows():
-            if b_segment.empty:
-                continue
-            b_idx = (
-                (b_segment["DistanceOffset"] - a_row["DistanceOffset"]).abs().idxmin()
-            )
-            if b_idx not in b_segment.index:
-                continue
-            b_closest = b_segment.loc[b_idx]
-            dist = abs(a_row["DistanceOffset"] - b_closest["DistanceOffset"])
-            distances.append(
-                {
-                    "distance_offset": a_row["DistanceOffset"],
-                    "distance_m": dist,
-                    "speed_a": a_row["Speed"],
-                    "speed_b": b_closest["Speed"],
-                }
-            )
+        if "Time" in b_segment.columns:
+            # On-track gap: for each sample of car A, take car B's row at the
+            # SAME time and compare their progress along the lap. (Matching
+            # by distance and then subtracting distances is always ~0.)
+            # Samples outside the common time window are skipped: at the
+            # edges the nearest-match clips to the segment boundary and
+            # fabricates a zero gap.
+            a_times = a_segment["Time"].apply(timedelta_to_seconds)
+            b_times = b_segment["Time"].apply(timedelta_to_seconds)
+            t_start = max(float(a_times.min()), float(b_times.min()))
+            t_end = min(float(a_times.max()), float(b_times.max()))
+
+            for (_, a_row), a_t in zip(a_segment.iterrows(), a_times):
+                if a_t < t_start or a_t > t_end:
+                    continue
+                b_idx = (b_times - a_t).abs().idxmin()
+                b_closest = b_segment.loc[b_idx]
+                dist = abs(a_row["DistanceOffset"] - b_closest["DistanceOffset"])
+                distances.append(
+                    {
+                        "distance_offset": a_row["DistanceOffset"],
+                        "distance_m": dist,
+                        "speed_a": a_row["Speed"],
+                        "speed_b": b_closest["Speed"],
+                    }
+                )
 
         if len(distances) < 2:
             return {"triggered": False, "reason": "Insufficient data points"}
@@ -251,7 +247,7 @@ class DriverAgnosticDetector:
         min_distance = high_speed_distances["distance_m"].min()
         decrease_pct = ((max_distance - min_distance) / max_distance) * 100
 
-        triggered = decrease_pct > self.PROXIMITY_THRESHOLD_PCT or time_triggered
+        triggered = bool(decrease_pct > self.PROXIMITY_THRESHOLD_PCT or time_triggered)
 
         return {
             "triggered": triggered,
@@ -262,6 +258,7 @@ class DriverAgnosticDetector:
             "high_speed_zone_kph": self.HIGH_SPEED_ZONE_THRESHOLD_KMH,
             "time_threshold_s": self.PROXIMITY_TIME_THRESHOLD,
             "time_proximity_triggered": time_triggered,
+            "min_time_gap_s": round(min_time_gap, 3) if min_time_gap is not None else None,
             "reason": f"Time proximity <{self.PROXIMITY_TIME_THRESHOLD}s"
             if time_triggered
             else f"Distance decreased by {decrease_pct:.1f}%"
@@ -346,7 +343,7 @@ class DriverAgnosticDetector:
                 "reason": "No brake data available",
             }
 
-        overlap = self._find_overlap_region(car_a_df, car_b_df)
+        overlap = find_overlap_region(car_a_df, car_b_df)
         if overlap is None:
             return {"triggered": False, "reason": "No telemetry overlap"}
 
@@ -484,27 +481,6 @@ class DriverAgnosticDetector:
             "speed_delta_triggered": speed_delta_trigger.get("triggered", False),
         }
 
-    def _find_overlap_region(
-        self, car_a_df: pd.DataFrame, car_b_df: pd.DataFrame
-    ) -> tuple[float, float] | None:
-        """Find distance region where both cars have telemetry overlap."""
-        a_start, a_end = (
-            car_a_df["DistanceOffset"].min(),
-            car_a_df["DistanceOffset"].max(),
-        )
-        b_start, b_end = (
-            car_b_df["DistanceOffset"].min(),
-            car_b_df["DistanceOffset"].max(),
-        )
-
-        overlap_start = max(a_start, b_start)
-        overlap_end = min(a_end, b_end)
-
-        if overlap_start >= overlap_end:
-            return None
-
-        return (overlap_start, overlap_end)
-
 
 def analyze_incident(
     car_a_df: pd.DataFrame,
@@ -528,8 +504,11 @@ def analyze_incident(
 
 
 if __name__ == "__main__":
+    # Synthetic smoke test: the rival car is FABRICATED from VER's telemetry
+    # (speed scaled 0.97, distance offset +1.8m). It exercises the code path,
+    # not real physics. The parquet has no X/Y channels, so lateral G is 0
+    # here (see telemetry_utils.compute_g_forces).
     import json
-    from functools import partial
     import numpy as np
 
     def convert_to_serializable(obj):
@@ -563,6 +542,6 @@ if __name__ == "__main__":
     result = convert_to_serializable(result)
 
     print("\n" + "=" * 60)
-    print("DRIVER-AGNOSTIC INCIDENT ANALYSIS")
+    print("DRIVER-AGNOSTIC INCIDENT ANALYSIS (synthetic rival car)")
     print("=" * 60)
     print(json.dumps(result, indent=2))
