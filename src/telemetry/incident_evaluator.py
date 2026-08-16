@@ -1,7 +1,16 @@
-"""F1 Overtake Incident Evaluator for StewardButSmarter.
+"""F1 Overtake Incident Evaluator for StewardButBetter.
 
-This module provides functionality to evaluate the legality of overtaking moves
-by analyzing telemetry data from two cars involved in an incident.
+Evaluates the legality of overtaking moves from two-car telemetry.
+
+Geometry notes:
+- Lateral separation requires X/Y position channels (FastF1 pos_data). It is
+  measured as the Euclidean car-to-car distance at the apex instant (the two
+  cars are nearly abreast there, so this approximates the lateral gap).
+  Without X/Y the apex analysis reports `unknown` instead of mislabelling
+  along-track offsets as lateral distance.
+- Dive-bombing: the car that reaches full braking LATER (and still makes the
+  corner alongside) braked later than its rival — that is the aggressive
+  move. The earlier braker is the one reacting defensively.
 """
 
 from __future__ import annotations
@@ -11,14 +20,17 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+from telemetry_utils import find_overlap_region, timedelta_to_seconds
 
 
 class IncidentEvaluator:
     """Evaluates F1 overtake incidents for legality."""
 
     F1_CAR_WIDTH = 2.0
+    DIVE_BOMB_THRESHOLD_MS = 200.0
 
     def __init__(self) -> None:
         self._logger = logging.getLogger(__name__)
@@ -30,28 +42,13 @@ class IncidentEvaluator:
         car_a_name: str = "Car A",
         car_b_name: str = "Car B",
     ) -> dict[str, Any]:
-        """Evaluate the legality of an overtaking move between two cars.
-
-        Args:
-            car_a_df: Telemetry DataFrame for car A with columns:
-                      [Speed, Throttle, Brake, Distance, DistanceOffset, Time]
-            car_b_df: Telemetry DataFrame for car B with columns:
-                      [Speed, Throttle, Brake, Distance, DistanceOffset, Time]
-            car_a_name: Name/identifier for car A (e.g., driver code)
-            car_b_name: Name/identifier for car B (e.g., driver code)
-
-        Returns:
-            Dictionary containing incident facts for the Chief Steward.
-        """
+        """Evaluate the legality of an overtaking move between two cars."""
         self._logger.info(f"Evaluating overtake between {car_a_name} and {car_b_name}")
 
-        car_a_df = car_a_df.copy()
-        car_b_df = car_b_df.copy()
+        car_a_df = car_a_df.copy().sort_values("DistanceOffset").reset_index(drop=True)
+        car_b_df = car_b_df.copy().sort_values("DistanceOffset").reset_index(drop=True)
 
-        car_a_df = car_a_df.sort_values("DistanceOffset").reset_index(drop=True)
-        car_b_df = car_b_df.sort_values("DistanceOffset").reset_index(drop=True)
-
-        overlap_region = self._find_overlap_region(car_a_df, car_b_df)
+        overlap_region = find_overlap_region(car_a_df, car_b_df)
 
         if overlap_region is None:
             return self._create_no_overlap_result(car_a_name, car_b_name)
@@ -65,9 +62,8 @@ class IncidentEvaluator:
             & (car_b_df["DistanceOffset"] <= overlap_region[1])
         ]
 
-        apex_a = self._find_apex(car_a_segment)
-        apex_b = self._find_apex(car_b_segment)
-
+        # Heuristic: the slower car at the apex tends to be the one on the
+        # inside line. Real inside/outside requires position data.
         inside_car, outside_car, inside_name, outside_name = self._determine_positions(
             car_a_segment, car_b_segment, car_a_name, car_b_name
         )
@@ -75,12 +71,11 @@ class IncidentEvaluator:
         apex_analysis = self._analyze_apex(
             inside_car, outside_car, inside_name, outside_name
         )
-
         brake_analysis = self._analyze_braking_points(
-            car_a_df, car_b_df, car_a_name, car_b_name
+            car_a_segment, car_b_segment, car_a_name, car_b_name
         )
 
-        incident_facts = {
+        return {
             "incident_summary": {
                 "overtaking_car": outside_name,
                 "defending_car": inside_name,
@@ -95,41 +90,24 @@ class IncidentEvaluator:
             "verdict": self._determine_verdict(apex_analysis, brake_analysis),
         }
 
-        return incident_facts
-
-    def _find_overlap_region(
-        self, car_a_df: pd.DataFrame, car_b_df: pd.DataFrame
-    ) -> tuple[float, float] | None:
-        """Find the distance region where both cars have telemetry overlap."""
-        a_start, a_end = (
-            car_a_df["DistanceOffset"].min(),
-            car_a_df["DistanceOffset"].max(),
-        )
-        b_start, b_end = (
-            car_b_df["DistanceOffset"].min(),
-            car_b_df["DistanceOffset"].max(),
-        )
-
-        overlap_start = max(a_start, b_start)
-        overlap_end = min(a_end, b_end)
-
-        if overlap_start >= overlap_end:
-            return None
-
-        return (overlap_start, overlap_end)
-
     def _find_apex(self, segment_df: pd.DataFrame) -> dict[str, Any]:
         """Locate the apex (point of minimum velocity) in a corner."""
         if segment_df.empty or "Speed" not in segment_df.columns:
-            return {"distance_offset": None, "speed_kmh": None, "index": None}
+            return {"distance_offset": None, "speed_kmh": None, "time": None, "index": None}
 
         min_speed_idx = segment_df["Speed"].idxmin()
         apex_row = segment_df.loc[min_speed_idx]
 
+        time_val = None
+        if "Time" in segment_df.columns and pd.notna(apex_row.get("Time")):
+            time_val = timedelta_to_seconds(apex_row["Time"])
+        elif "TimeSeconds" in segment_df.columns:
+            time_val = float(apex_row["TimeSeconds"])
+
         return {
             "distance_offset": float(apex_row["DistanceOffset"]),
             "speed_kmh": float(apex_row["Speed"]),
-            "time": float(apex_row["Time"]) if "Time" in segment_df.columns else None,
+            "time": time_val,
             "index": int(min_speed_idx),
         }
 
@@ -140,28 +118,28 @@ class IncidentEvaluator:
         car_a_name: str,
         car_b_name: str,
     ) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
-        """Determine which car is inside vs outside at the corner apex."""
+        """Determine which car is likely inside vs outside at the corner apex."""
         apex_a_speed = self._find_apex(car_a_segment)["speed_kmh"]
         apex_b_speed = self._find_apex(car_b_segment)["speed_kmh"]
 
         if apex_a_speed is None or apex_b_speed is None:
-            avg_a = car_a_segment["Speed"].mean() if not car_a_segment.empty else 0
-            avg_b = car_b_segment["Speed"].mean() if not car_b_segment.empty else 0
-            apex_a_speed = avg_a
-            apex_b_speed = avg_b
+            apex_a_speed = car_a_segment["Speed"].mean() if not car_a_segment.empty else 0
+            apex_b_speed = car_b_segment["Speed"].mean() if not car_b_segment.empty else 0
 
         if apex_a_speed <= apex_b_speed:
-            inside_car = car_a_segment
-            outside_car = car_b_segment
-            inside_name = car_a_name
-            outside_name = car_b_name
-        else:
-            inside_car = car_b_segment
-            outside_car = car_a_segment
-            inside_name = car_b_name
-            outside_name = car_a_name
+            return car_a_segment, car_b_segment, car_a_name, car_b_name
+        return car_b_segment, car_a_segment, car_b_name, car_a_name
 
-        return inside_car, outside_car, inside_name, outside_name
+    def _position_at_time(self, df: pd.DataFrame, time_val: float) -> tuple[float, float] | None:
+        """(X, Y) of a car at a given time, or None when positions are missing."""
+        if not {"X", "Y", "Time"}.issubset(df.columns):
+            return None
+        times = df["Time"].apply(timedelta_to_seconds)
+        row = df.loc[(times - time_val).abs().idxmin()]
+        x, y = row.get("X"), row.get("Y")
+        if pd.isna(x) or pd.isna(y):
+            return None
+        return float(x), float(y)
 
     def _analyze_apex(
         self,
@@ -170,7 +148,7 @@ class IncidentEvaluator:
         inside_name: str,
         outside_name: str,
     ) -> dict[str, Any]:
-        """Analyze the apex and lateral distance between cars."""
+        """Analyze the car-to-car spatial gap at the apex from X/Y positions."""
         apex_inside = self._find_apex(inside_car)
         apex_outside = self._find_apex(outside_car)
 
@@ -181,99 +159,111 @@ class IncidentEvaluator:
             return {
                 "inside_car": inside_name,
                 "outside_car": outside_name,
-                "inside_apex_speed_kmh": None,
-                "outside_apex_speed_kmh": None,
                 "lateral_distance_m": None,
                 "sufficient_space": None,
-                "violation": False,
+                "violation": None,
+                "note": "insufficient telemetry",
             }
 
-        lateral_distance = abs(
-            apex_inside["distance_offset"] - apex_outside["distance_offset"]
+        inside_pos = (
+            self._position_at_time(inside_car, apex_inside["time"])
+            if apex_inside["time"] is not None
+            else None
+        )
+        outside_pos = (
+            self._position_at_time(outside_car, apex_inside["time"])
+            if apex_inside["time"] is not None
+            else None
         )
 
-        sufficient_space = lateral_distance >= self.F1_CAR_WIDTH
+        if inside_pos is None or outside_pos is None:
+            return {
+                "inside_car": inside_name,
+                "outside_car": outside_name,
+                "inside_apex_speed_kmh": round(apex_inside["speed_kmh"], 1),
+                "outside_apex_speed_kmh": round(apex_outside["speed_kmh"], 1),
+                "lateral_distance_m": None,
+                "required_clearance_m": self.F1_CAR_WIDTH,
+                "sufficient_space": None,
+                "violation": None,
+                "note": "no X/Y position channels; lateral gap unknown",
+            }
 
-        violation = not sufficient_space
+        gap_m = float(np.hypot(inside_pos[0] - outside_pos[0], inside_pos[1] - outside_pos[1]))
+        sufficient_space = gap_m >= self.F1_CAR_WIDTH
 
         return {
             "inside_car": inside_name,
             "outside_car": outside_name,
-            "inside_apex_speed_kmh": round(apex_inside["speed_kmh"], 1)
-            if apex_inside["speed_kmh"]
-            else None,
-            "outside_apex_speed_kmh": round(apex_outside["speed_kmh"], 1)
-            if apex_outside["speed_kmh"]
-            else None,
-            "apex_distance_offset_m": round(
-                (apex_inside["distance_offset"] + apex_outside["distance_offset"]) / 2,
-                2,
-            ),
-            "lateral_distance_m": round(lateral_distance, 2),
+            "inside_apex_speed_kmh": round(apex_inside["speed_kmh"], 1),
+            "outside_apex_speed_kmh": round(apex_outside["speed_kmh"], 1),
+            "lateral_distance_m": round(gap_m, 2),
             "required_clearance_m": self.F1_CAR_WIDTH,
             "sufficient_space": sufficient_space,
-            "violation": violation,
+            "violation": not sufficient_space,
         }
 
     def _analyze_braking_points(
         self,
-        car_a_df: pd.DataFrame,
-        car_b_df: pd.DataFrame,
+        car_a_segment: pd.DataFrame,
+        car_b_segment: pd.DataFrame,
         car_a_name: str,
         car_b_name: str,
     ) -> dict[str, Any]:
-        """Compare braking points to detect dive-bombing."""
-        brake_a_100 = self._find_first_100_brake(car_a_df, car_a_name)
-        brake_b_100 = self._find_first_100_brake(car_b_df, car_b_name)
+        """Compare full-braking onset to detect dive-bombing (later braking)."""
+        brake_a = self._find_first_100_brake(car_a_segment)
+        brake_b = self._find_first_100_brake(car_b_segment)
 
-        if brake_a_100 is None or brake_b_100 is None:
+        if brake_a is None or brake_b is None:
             return {
-                "car_a_brake_100_time": brake_a_100["time"] if brake_a_100 else None,
-                "car_b_brake_100_time": brake_b_100["time"] if brake_b_100 else None,
+                "car_a_brake_time": brake_a["time"] if brake_a else None,
+                "car_b_brake_time": brake_b["time"] if brake_b else None,
                 "dive_bomb_detected": False,
-                "aggressive_braker": None,
+                "late_braker": None,
                 "time_difference_ms": None,
             }
 
-        time_diff_ms = abs(brake_a_100["time"] - brake_b_100["time"])
+        time_diff_ms = abs(brake_a["time"] - brake_b["time"]) * 1000.0
+        dive_bomb_detected = time_diff_ms > self.DIVE_BOMB_THRESHOLD_MS
 
-        dive_bomb_threshold_ms = 200
-        dive_bomb_detected = time_diff_ms > dive_bomb_threshold_ms
-
-        aggressive_braker = None
+        # The dive-bomber brakes LATER than the rival, not earlier.
+        late_braker = None
         if dive_bomb_detected:
-            if brake_a_100["time"] < brake_b_100["time"]:
-                aggressive_braker = car_a_name
-            else:
-                aggressive_braker = car_b_name
+            late_braker = car_a_name if brake_a["time"] > brake_b["time"] else car_b_name
 
         return {
             "car_a_name": car_a_name,
             "car_b_name": car_b_name,
-            f"{car_a_name.lower()}_brake_100_time": round(brake_a_100["time"], 3),
-            f"{car_b_name.lower()}_brake_100_time": round(brake_b_100["time"], 3),
-            "time_difference_ms": round(time_diff_ms * 1000, 1),
-            "dive_bomb_threshold_ms": dive_bomb_threshold_ms,
+            "car_a_brake_time": round(brake_a["time"], 3),
+            "car_b_brake_time": round(brake_b["time"], 3),
+            "time_difference_ms": round(time_diff_ms, 1),
+            "dive_bomb_threshold_ms": self.DIVE_BOMB_THRESHOLD_MS,
             "dive_bomb_detected": dive_bomb_detected,
-            "aggressive_braker": aggressive_braker,
+            "late_braker": late_braker,
         }
 
-    def _find_first_100_brake(
-        self, df: pd.DataFrame, car_name: str
-    ) -> dict[str, Any] | None:
+    def _find_first_100_brake(self, df: pd.DataFrame) -> dict[str, Any] | None:
         """Find the first instance of 100% brake application."""
-        if "Brake" not in df.columns:
+        if df is None or df.empty or "Brake" not in df.columns:
             return None
 
         brake_100_mask = df["Brake"] >= 1.0
         if not brake_100_mask.any():
             return None
 
-        first_brake_idx = df[brake_100_mask].index[0]
-        brake_row = df.loc[first_brake_idx]
+        brake_row = df[brake_100_mask].iloc[0]
+
+        time_val = None
+        if "Time" in df.columns and pd.notna(brake_row.get("Time")):
+            time_val = timedelta_to_seconds(brake_row["Time"])
+        elif "TimeSeconds" in df.columns:
+            time_val = float(brake_row["TimeSeconds"])
+
+        if time_val is None:
+            return None
 
         return {
-            "time": float(brake_row["Time"]) if "Time" in df.columns else None,
+            "time": time_val,
             "distance_offset": float(brake_row["DistanceOffset"]),
             "speed_kmh": float(brake_row["Speed"]),
         }
@@ -283,27 +273,29 @@ class IncidentEvaluator:
     ) -> dict[str, Any]:
         """Determine the overall verdict based on apex and braking analysis."""
         violations = []
+        unknowns = []
 
-        if apex_analysis.get("violation", False):
+        if apex_analysis.get("violation") is None:
+            unknowns.append("Lateral gap at apex could not be measured (no position data)")
+        elif apex_analysis.get("violation", False):
             violations.append("Insufficient lateral clearance at apex")
 
         if brake_analysis.get("dive_bomb_detected", False):
             violations.append(
-                f"Dive-bomb detected - {brake_analysis['aggressive_braker']} braked excessively early"
+                f"Dive-bomb detected - {brake_analysis['late_braker']} braked late into the corner"
             )
 
         if violations:
             verdict = "PENALTY"
             summary = f"Violation(s) detected: {'; '.join(violations)}"
+        elif unknowns:
+            verdict = "INCONCLUSIVE"
+            summary = "; ".join(unknowns)
         else:
             verdict = "NO_INVESTIGATION"
-            summary = "No规则 violations detected. Overtake appears legal."
+            summary = "No rule violations detected. Overtake appears legal."
 
-        return {
-            "verdict": verdict,
-            "violations": violations,
-            "summary": summary,
-        }
+        return {"verdict": verdict, "violations": violations, "summary": summary}
 
     def _create_no_overlap_result(
         self, car_a_name: str, car_b_name: str
@@ -320,20 +312,19 @@ class IncidentEvaluator:
             "verdict": {
                 "verdict": "NO_DATA",
                 "violations": [],
-                "summary": f"Insufficient telemetry overlap between {car_a_name} and {car_b_name} to make determination.",
+                "summary": (
+                    f"Insufficient telemetry overlap between {car_a_name} and "
+                    f"{car_b_name} to make determination."
+                ),
             },
         }
 
-    def save_incident_report(
-        self, incident_facts: dict[str, Any], filename: str
-    ) -> None:
+    def save_incident_report(self, incident_facts: dict[str, Any], filename: str) -> None:
         """Save incident facts to JSON file."""
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(output_path, "w") as f:
             json.dump(incident_facts, f, indent=2)
-
         self._logger.info(f"Saved incident report to {output_path}")
 
 
@@ -343,115 +334,36 @@ def evaluate_overtake_legality(
     car_a_name: str = "Car A",
     car_b_name: str = "Car B",
 ) -> dict[str, Any]:
-    """Evaluate the legality of an overtaking move between two F1 cars.
-
-    Args:
-        car_a_df: Telemetry DataFrame for car A with columns:
-                  [Speed, Throttle, Brake, Distance, DistanceOffset, Time]
-        car_b_df: Telemetry DataFrame for car B with columns:
-                  [Speed, Throttle, Brake, Distance, DistanceOffset, Time]
-        car_a_name: Name/identifier for car A (e.g., driver code like 'VER')
-        car_b_name: Name/identifier for car B (e.g., driver code like 'HAM')
-
-    Returns:
-        Dictionary containing incident facts in JSON format for Chief Steward review.
-        Includes:
-        - Apex analysis (minimum speed point, lateral distance, clearance)
-        - Braking analysis (100% brake times, dive-bomb detection)
-        - Verdict (PENALTY or NO_INVESTIGATION)
-    """
+    """Evaluate the legality of an overtaking move between two F1 cars."""
     evaluator = IncidentEvaluator()
-    return evaluator.evaluate_overtake_legality(
-        car_a_df, car_b_df, car_a_name, car_b_name
-    )
+    return evaluator.evaluate_overtake_legality(car_a_df, car_b_df, car_a_name, car_b_name)
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path
+    # Synthetic smoke test: two fabricated cars through a corner. Car B brakes
+    # 0.4s later than Car A (dive-bomb shape) and runs 1.2m from Car A at the
+    # apex (below the 2.0m car-width threshold).
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
+    t = np.arange(0, 6, 0.05)
 
-    TELEMETRY_FILE = Path(__file__).parent / "verstappen_abu_dhabi_2021_lap58.parquet"
-    OUTPUT_FILE = Path(__file__).parent.parent / "ui" / "public" / "live_incident.json"
+    def car_frame(speed_profile, lateral_offset, brake_start):
+        speed = speed_profile(t)
+        dist = np.cumsum(speed / 3.6 * 0.05)
+        return pd.DataFrame(
+            {
+                "Time": pd.to_timedelta(t, unit="s"),
+                "Speed": speed,
+                "Brake": (t >= brake_start) & (t < brake_start + 1.0),
+                "DistanceOffset": dist - dist[0],
+                "X": dist,
+                "Y": np.full_like(t, lateral_offset, dtype=float),
+            }
+        )
 
-    ver_df = pd.read_parquet(TELEMETRY_FILE)
-    print(f"Loaded Verstappen telemetry: {len(ver_df)} points")
+    corner = lambda tt: np.where(tt < 2.0, 300 - 40 * (tt ** 2), np.maximum(120, 120 + 30 * (tt - 2)))
+    car_a = car_frame(corner, lateral_offset=0.0, brake_start=1.6)
+    car_b = car_frame(corner, lateral_offset=1.2, brake_start=2.0)
 
-    ham_df = ver_df.copy()
-    ham_df["Speed"] = ham_df["Speed"] * 0.97
-    ham_df["DistanceOffset"] = ham_df["DistanceOffset"] + 1.8
-    ham_df["DriverCode"] = "HAM"
-    ham_df["Brake"] = ver_df["Brake"]
-
-    ver_df = ver_df[ver_df["DriverCode"] == "VER"]
-
-    corner_mask = (ver_df["DistanceOffset"] >= 50) & (ver_df["DistanceOffset"] <= 150)
-    corner_segment = ver_df[corner_mask]
-
-    apex_idx = corner_segment["Speed"].idxmin()
-    apex_speed = corner_segment.loc[apex_idx, "Speed"]
-    apex_distance = corner_segment.loc[apex_idx, "DistanceOffset"]
-
-    inside_car_offset = apex_distance
-    outside_car_offset = apex_distance + 1.8
-    apex_gap = abs(outside_car_offset - inside_car_offset)
-    apex_clearance = apex_gap
-
-    speed_ms = apex_speed / 3.6
-    corner_radius = 30.0
-    lateral_g = (speed_ms**2) / (9.81 * corner_radius) if corner_radius > 0 else 0
-
-    braking_idx = ver_df[ver_df["Brake"] == True].index
-    if len(braking_idx) > 0:
-        first_brake_idx = braking_idx[0]
-        brake_speed = ver_df.loc[first_brake_idx, "Speed"]
-        braking_distance = ver_df.loc[first_brake_idx, "DistanceOffset"]
-        braking_decel = abs((brake_speed - ver_df["Speed"].iloc[0]) / 3.6) / 2.0
-        braking_force = min(braking_decel / 9.81, 1.0)
-    else:
-        braking_force = 0.0
-
-    ART_33_4_WIDTH = 2.0
-    verdict = "PENALTY" if apex_clearance < ART_33_4_WIDTH else "CLEAN"
-    defense_category = "aggressive defense" if verdict == "PENALTY" else "legal defense"
-
-    confidence = (
-        0.85 if apex_clearance < 1.0 else 0.95 if apex_clearance > 2.5 else 0.75
-    )
-
-    incident_snapshot = (
-        f"Car {ver_df['DriverCode'].iloc[0]} vs Car HAM; "
-        f"Apex clearance {apex_clearance:.1f}m; entry speed {apex_speed:.0f}km/h. "
-        f"Incident categorized as {defense_category}."
-    )
-
-    live_incident = {
-        "driver": "VER",
-        "speed_kph": round(float(apex_speed), 1),
-        "apex_gap": round(float(apex_gap), 2),
-        "apex_clearance": round(float(apex_clearance), 2),
-        "lateral_g": round(float(lateral_g), 2),
-        "braking_force": round(float(braking_force), 2),
-        "verdict": verdict,
-        "article_cited": "FIA International Sporting Code Appendix L, Art 33.4",
-        "confidence_score": confidence,
-        "incident_snapshot": incident_snapshot,
-        "incident_type": "overtake_legality",
-        "track": "Abu Dhabi Grand Prix",
-        "lap": 58,
-        "timestamp": "2021-12-12T20:00:00Z",
-    }
-
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(live_incident, f, indent=2)
-
-    print("\n" + "=" * 60)
-    print("LIVE INCIDENT REPORT")
-    print("=" * 60)
-    print(json.dumps(live_incident, indent=2))
-    print(f"\nSaved to: {OUTPUT_FILE}")
+    result = evaluate_overtake_legality(car_a, car_b, "Car A", "Car B")
+    print(json.dumps(result, indent=2))
