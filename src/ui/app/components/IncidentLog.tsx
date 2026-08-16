@@ -14,11 +14,7 @@ export default function IncidentLog() {
   const dismissTimeoutsRef = useRef<Record<string, number>>({});
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
-  const mutate = async (key: string) => {
-    if (key !== "/api/telemetry") {
-      return;
-    }
-
+  const refreshInvestigations = async () => {
     const response = await fetch("/api/telemetry", { cache: "no-store" });
     if (!response.ok) {
       throw new Error(`Investigation refresh failed (${response.status})`);
@@ -35,15 +31,8 @@ export default function IncidentLog() {
 
     const fetchInvestigations = async () => {
       try {
-        const response = await fetch("/api/telemetry", { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error(`Investigation fetch failed (${response.status})`);
-        }
-
-        const json = (await response.json()) as { investigations: ActiveInvestigation[] };
-        const data = json.investigations ?? [];
+        await refreshInvestigations();
         if (isMounted) {
-          setInvestigations(Array.isArray(data) ? data : []);
           setError(null);
         }
       } catch (fetchError) {
@@ -83,7 +72,7 @@ export default function IncidentLog() {
             throw new Error(`Dismiss failed (${response.status})`);
           }
 
-          await mutate("/api/investigations");
+          await refreshInvestigations();
           setInvestigations((previous) => previous.filter((entry) => entry.id !== id));
           setClosedIds((previous) => {
             if (!(id in previous)) {

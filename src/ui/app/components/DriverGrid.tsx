@@ -92,27 +92,21 @@ const DriverGrid = memo(function DriverGrid() {
   useEffect(() => {
     let isMounted = true;
 
-    const fetchLiveAndInvestigations = async () => {
+    const fetchDashboardState = async () => {
       try {
-        const [liveResponse, telemetryResponse] = await Promise.all([
-          fetch("/live_incident.json", { cache: "no-store" }),
-          fetch("/api/telemetry", { cache: "no-store" }),
-        ]);
-
-        let nextPayload: LiveIncidentPayload | null = null;
-        if (liveResponse.ok) {
-          nextPayload = await liveResponse.json() as LiveIncidentPayload;
+        const response = await fetch("/api/telemetry", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Dashboard feed failed (${response.status})`);
         }
 
-        let nextInvestigations: ActiveInvestigation[] = [];
-        if (telemetryResponse.ok) {
-          const telemetryData = await telemetryResponse.json() as { investigations: ActiveInvestigation[] };
-          nextInvestigations = Array.isArray(telemetryData.investigations) ? telemetryData.investigations : [];
-        }
+        const data = (await response.json()) as {
+          investigations: ActiveInvestigation[];
+          live: LiveIncidentPayload | null;
+        };
 
         if (isMounted) {
-          setPayload(nextPayload);
-          setInvestigations(nextInvestigations);
+          setPayload(data.live);
+          setInvestigations(Array.isArray(data.investigations) ? data.investigations : []);
           setError(null);
         }
       } catch (fetchError) {
@@ -122,8 +116,8 @@ const DriverGrid = memo(function DriverGrid() {
       }
     };
 
-    fetchLiveAndInvestigations();
-    const interval = window.setInterval(fetchLiveAndInvestigations, 2000);
+    fetchDashboardState();
+    const interval = window.setInterval(fetchDashboardState, 2000);
 
     return () => {
       isMounted = false;
