@@ -1,21 +1,20 @@
-# Mistral & AI
-mistralai
-huggingface_hub
-python-dotenv
+# Brain (RAG + verdicts)
+mistralai>=1.0
+sentence-transformers>=2.7
+langchain-community>=0.2
+langchain-core>=0.2
+faiss-cpu>=1.8
 
-# F1 & Data
-fastf1
-pandas
-numpy
+# Telemetry
+fastf1>=3.4
+pandas>=2.0
+numpy>=1.26
+requests>=2.31
+python-dotenv>=1.0
 
-# Vector Search
-faiss-cpu
+# Brain service
+fastapi>=0.111
+uvicorn>=0.30
 
-# Vision & Processing
-opencv-python
-pillow
-PyMuPDF
-
-# Web/API (Optional for UI)
-fastapi
-uvicorn
+# Development
+pytest>=8.0
